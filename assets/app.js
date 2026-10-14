@@ -162,6 +162,8 @@ function normalize(d) {
     // Chi phí quảng cáo theo ngày: adSpend[YYYY-MM-DD][mã tài khoản QC] = số tiền
     adAccounts: Array.isArray(d.adAccounts) ? d.adAccounts : [], adSpend: d.adSpend && typeof d.adSpend === 'object' ? d.adSpend : {},
     costs: d.costs && typeof d.costs === 'object' ? d.costs : {},
+    // Truyền thông Social (social.js): traffic kênh, bài đăng, chỉ tiêu
+    social: d.social && typeof d.social === 'object' ? d.social : null,
     demo: !!d.demo,
   };
 }
@@ -714,7 +716,7 @@ function newOrder(prefCustomerId) {
       <div class="full"><button type="button" class="btn sm" id="add-item">+ Thêm sản phẩm</button></div>
       <label>Kênh bán<select name="channel">${opts(CHANNELS, defChannel)}</select></label>
       <label>Đơn vị vận chuyển<select name="carrier">${opts(CARRIERS, defCarrier)}</select></label>
-      <label class="full">Đến từ chiến dịch marketing<select name="campaignId"><option value="">— Không / khách tự nhiên —</option>${campaignOptions('')}</select></label>
+      ${state.campaigns.length ? `<label class="full">Đến từ chiến dịch marketing<select name="campaignId"><option value="">— Không / khách tự nhiên —</option>${campaignOptions('')}</select></label>` : ''}
       <label>Phí ship thu của khách (₫)<input name="shippingFee" type="number" min="0" step="1000" value="${state.demo ? 30000 : 0}"></label>
       <label>Giảm giá (₫)<input name="discount" type="number" min="0" step="1000" value="0"></label>
       <div class="total-line"><span>Tổng tiền khách trả</span><b id="o-total">0 ₫</b></div>

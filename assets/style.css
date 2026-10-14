@@ -244,6 +244,35 @@ textarea { resize: vertical; min-height: 64px; }
 }
 .toast.show { opacity: 1; transform: translateX(-50%); }
 
+/* ---------- Truyền thông Social ---------- */
+.soc-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.soc-card, .soc-target { border-top: 3px solid var(--c); }
+.soc-big { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.soc-big b { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.soc-big span { color: var(--muted); font-size: 13px; }
+.soc-target .hbar-t { margin-top: -4px; }
+.mini-kpis.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.cal-month { min-width: 150px; text-align: center; text-transform: capitalize; }
+.cal { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.cal-h { padding: 8px 10px; font-size: 12px; color: var(--muted); background: var(--panel-2); border-bottom: 1px solid var(--line); }
+.cal-d { min-height: 112px; padding: 6px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); cursor: pointer; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.cal-d:nth-child(7n) { border-right: 0; }
+.cal-d:hover { background: var(--panel-2); }
+.cal-d.out { opacity: .45; }
+.cal-d.today .cal-n { background: var(--accent); color: var(--accent-ink); border-radius: 99px; padding: 0 7px; }
+.cal-n { font-size: 12px; font-weight: 600; align-self: flex-start; margin-bottom: 2px; }
+.pchip { font-size: 11px; line-height: 1.3; padding: 3px 6px; border-radius: 6px; border-left: 3px solid var(--c);
+  background: color-mix(in srgb, var(--c) 16%, var(--panel)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pchip i { font-style: normal; color: var(--muted); }
+.pchip:not(.st-posted) { background: transparent; border: 1px dashed color-mix(in srgb, var(--c) 60%, transparent); border-left: 3px solid var(--c); }
+.pchip.late { text-decoration: line-through; text-decoration-color: var(--bad); color: var(--bad); }
+@media (max-width: 760px) {
+  .cal-d { min-height: 64px; padding: 3px; }
+  .pchip { font-size: 0; padding: 0; height: 6px; border-radius: 3px; border-left-width: 0; background: var(--c); }
+  .pchip:not(.st-posted) { background: color-mix(in srgb, var(--c) 45%, transparent); border: 0; }
+  .mini-kpis.three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 /* ---------- Chi phí quảng cáo ---------- */
 .dot-c { display: inline-block; width: 9px; height: 9px; border-radius: 3px; background: var(--c); margin-right: 6px; vertical-align: 0; }
 .ads-grid td, .ads-grid th { padding: 6px 12px; }
