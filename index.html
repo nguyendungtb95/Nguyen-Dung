@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fashion Store Manager</title>
+  <meta name="description" content="Quản lý cửa hàng thời trang online: đơn hàng & tracking, workflow, doanh thu – chi phí, khách hàng.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="logo">FS</span>
+      <div><b>Fashion Store</b><small>Bảng quản trị</small></div>
+    </div>
+    <nav class="nav">
+      <a href="#dashboard" data-view="dashboard">Tổng quan</a>
+      <a href="#orders" data-view="orders">Đơn hàng & Tracking</a>
+      <a href="#workflow" data-view="workflow">Workflow</a>
+      <a href="#marketing" data-view="marketing">Marketing</a>
+      <a href="#finance" data-view="finance">Thu – Chi</a>
+      <a href="#customers" data-view="customers">Khách hàng</a>
+      <a href="#settings" data-view="settings">Dữ liệu</a>
+    </nav>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <h1 id="page-title">Tổng quan</h1>
+      <div class="topbar-r">
+        <span id="today-label" class="muted"></span>
+        <button class="btn primary" data-action="newOrder">+ Tạo đơn</button>
+      </div>
+    </header>
+    <section id="view" class="view"></section>
+  </main>
+
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3 id="modal-title"></h3>
+        <button class="icon-btn" data-action="closeModal" aria-label="Đóng">×</button>
+      </div>
+      <div id="modal-body" class="modal-body"></div>
+    </div>
+  </div>
+  <div id="toast" class="toast"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <script src="assets/app.js"></script>
+</body>
+</html>

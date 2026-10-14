@@ -1,0 +1,5 @@
+.claude/
+*.json.bak
+fashion-store-backup-*.json
+Thumbs.db
+.DS_Store
