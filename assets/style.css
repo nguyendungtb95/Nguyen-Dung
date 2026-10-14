@@ -244,6 +244,16 @@ textarea { resize: vertical; min-height: 64px; }
 }
 .toast.show { opacity: 1; transform: translateX(-50%); }
 
+/* ---------- Chi phí quảng cáo ---------- */
+.dot-c { display: inline-block; width: 9px; height: 9px; border-radius: 3px; background: var(--c); margin-right: 6px; vertical-align: 0; }
+.ads-grid td, .ads-grid th { padding: 6px 12px; }
+.ad-input { width: 118px; text-align: right; padding: 5px 8px; font-variant-numeric: tabular-nums; }
+.ad-input:placeholder-shown { color: var(--muted); }
+.ads-grid tr.is-today td:first-child b { color: var(--accent); }
+.ads-grid thead th { position: sticky; top: 0; z-index: 1; }
+details.help summary { cursor: pointer; }
+details.help ul { margin: 10px 0 0; padding-left: 18px; line-height: 1.6; }
+
 /* ---------- SPX ---------- */
 .spx-hint { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; margin: 0 0 14px; padding: 12px 14px;
   border-radius: 10px; background: color-mix(in srgb, #ee4d2d 9%, var(--panel)); border: 1px solid color-mix(in srgb, #ee4d2d 30%, var(--line)); font-size: 13px; }

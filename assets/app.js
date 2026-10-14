@@ -87,6 +87,19 @@ const orderFee = o => o.status === 'cancelled' ? 0 : (+o.platformFee || 0);
 // Phí vận chuyển shop tự trả cho hãng (VD: SPX – gồm phí hoàn hàng, phí COD, bảo hiểm); đơn hủy trước khi gửi không tốn phí
 const orderShip = o => o.status === 'cancelled' ? 0 : (+o.shipCost || 0);
 const SPX_PAYERS = ['Người gửi trả phí', 'Người nhận trả'];
+// Tài khoản quảng cáo: { id, name, channel, shop } – channel/shop trùng với kênh bán để tính ROAS theo kênh
+const accLabel = a => a.shop ? `${a.channel} · ${a.shop}` : a.channel;
+const adSpendDay = (day, accFilter) => Object.entries((state.adSpend || {})[day] || {}).reduce((s, [acc, v]) => s + (!accFilter || accFilter(acc) ? +v || 0 : 0), 0);
+function adSpendIn(r, accFilter) {
+  let s = 0;
+  for (const day of Object.keys(state.adSpend || {})) if (inRange(day, r)) s += adSpendDay(day, accFilter);
+  return s;
+}
+// Chi phí QC của các tài khoản thuộc 1 kênh (VD "Shopee" gồm mọi shop, "Shopee · Shop chính" chỉ shop đó)
+const adSpendFor = (r, label, exact = false) => {
+  const ids = new Set(state.adAccounts.filter(a => accLabel(a) === label || (!exact && a.channel === label)).map(a => a.id));
+  return ids.size ? adSpendIn(r, id => ids.has(id)) : 0;
+};
 const normPhone = p => { const d = String(p || '').replace(/\D/g, '').replace(/^84(?=\d{9}$)/, ''); return d.length === 9 ? '0' + d : d; };
 // Kênh kèm tên gian hàng (VD: "Shopee · Shop phụ") khi bán trên nhiều shop cùng sàn
 const channelLabel = o => o.shop ? `${o.channel} · ${o.shop}` : o.channel;
@@ -126,6 +139,8 @@ function normalize(d) {
   return {
     orders: d.orders || [], customers: d.customers || [], tasks: d.tasks || [],
     transactions: d.transactions || [], careLogs: d.careLogs || [], campaigns: d.campaigns || [],
+    // Chi phí quảng cáo theo ngày: adSpend[YYYY-MM-DD][mã tài khoản QC] = số tiền
+    adAccounts: Array.isArray(d.adAccounts) ? d.adAccounts : [], adSpend: d.adSpend && typeof d.adSpend === 'object' ? d.adSpend : {},
     costs: d.costs && typeof d.costs === 'object' ? d.costs : {},
     demo: !!d.demo,
   };
@@ -306,10 +321,11 @@ function metrics(r) {
   const missingCostRevenue = valid.reduce((s, o) => s + o.items.filter(i => !itemCost(i)).reduce((a, i) => a + i.qty * i.price, 0), 0);
   const opex = tx.filter(isOpex).reduce((s, t) => s + +t.amount, 0);
   const purchases = tx.filter(t => t.type === 'expense' && t.category === 'Nhập hàng').reduce((s, t) => s + +t.amount, 0);
-  const expense = opex + platformFees + shipCosts + cogs;
+  const adSpend = adSpendIn(r);
+  const expense = opex + adSpend + platformFees + shipCosts + cogs;
   const revenue = orderRevenue + otherIncome;
   return {
-    orders, valid, tx, orderRevenue, otherIncome, revenue, expense, platformFees, shipCosts, cogs, opex, purchases, missingCostRevenue,
+    orders, valid, tx, orderRevenue, otherIncome, revenue, expense, platformFees, shipCosts, cogs, opex, adSpend, purchases, missingCostRevenue,
     grossProfit: orderRevenue - cogs - platformFees - shipCosts, profit: revenue - expense,
     newCustomers: state.customers.filter(c => inRange(dayOf(c.createdAt), r)).length,
     badRate: orders.length ? orders.filter(o => !isRevenue(o)).length / orders.length : 0,
@@ -329,6 +345,7 @@ function dailySeries(r) {
     if (!(t.date in rev)) return;
     if (t.type === 'income') rev[t.date] += +t.amount; else if (isOpex(t)) exp[t.date] += +t.amount;
   });
+  days.forEach(d => { exp[d] += adSpendDay(d); });
   return { days, rev: days.map(x => rev[x]), exp: days.map(x => exp[x]) };
 }
 function customerStats() {
@@ -848,7 +865,7 @@ function applyTemplate(i) {
 function renderFinance(el) {
   const r = periodRange(ui.finPeriod), m = metrics(r);
   const expCats = sumBy(m.tx.filter(isOpex), t => t.category, t => +t.amount);
-  [['Giá vốn hàng bán', m.cogs], ['Phí sàn TMĐT', m.platformFees], ['Vận chuyển', m.shipCosts]].forEach(([k, v]) => {
+  [['Giá vốn hàng bán', m.cogs], ['Phí sàn TMĐT', m.platformFees], ['Vận chuyển', m.shipCosts], ['Quảng cáo', m.adSpend]].forEach(([k, v]) => {
     if (!v) return;
     const row = expCats.find(c => c[0] === k);
     if (row) row[1] += v; else expCats.push([k, v]);
@@ -856,14 +873,14 @@ function renderFinance(el) {
   expCats.sort((a, b) => b[1] - a[1]);
   // Lợi nhuận theo kênh bán: doanh thu − giá vốn − phí sàn − chi phí chiến dịch của kênh
   // Mỗi kênh một dòng; kênh bán trên nhiều shop (VD Shopee) tách thành từng shop
-  const chKeys = [...new Set([...CHANNELS, ...m.orders.map(channelLabel)])];
+  const chKeys = [...new Set([...CHANNELS, ...m.orders.map(channelLabel), ...state.adAccounts.map(accLabel)])];
   const byCh = chKeys.map(ch => {
     const os = m.orders.filter(o => channelLabel(o) === ch);
     const rev = os.filter(isRevenue).reduce((s, o) => s + orderTotal(o), 0);
     const fee = os.reduce((s, o) => s + orderFee(o) + orderShip(o), 0);
     const cogs = os.reduce((s, o) => s + orderCogs(o), 0);
     const ids = new Set(state.campaigns.filter(c => c.channel === ch).map(c => c.id));
-    const mkt = m.tx.filter(t => t.type === 'expense' && ids.has(t.campaignId)).reduce((s, t) => s + +t.amount, 0);
+    const mkt = m.tx.filter(t => t.type === 'expense' && ids.has(t.campaignId)).reduce((s, t) => s + +t.amount, 0) + adSpendFor(r, ch, true);
     return { ch, n: os.filter(isRevenue).length, rev, cogs, fee, mkt, net: rev - cogs - fee - mkt };
   }).filter(x => x.rev || x.fee || x.mkt);
   const step = (label, v, sign = '', strong = false) => `<li><span>${strong ? `<b>${label}</b>` : label}</span>${strong ? `<b>${sign}${money(v)}</b>` : `<span>${sign}${money(v)}</span>`}</li>`;
@@ -876,16 +893,17 @@ function renderFinance(el) {
     <div class="kpis">
       ${kpi('Doanh thu', money(m.revenue), `${m.valid.length} đơn hợp lệ${m.otherIncome ? ' · thu khác ' + money(m.otherIncome) : ''}`)}
       ${kpi('Lãi gộp', money(m.grossProfit), `Sau giá vốn, phí sàn & ship · biên ${pct(m.orderRevenue ? m.grossProfit / m.orderRevenue : 0)}`)}
-      ${kpi('Chi phí vận hành', money(m.opex), 'Quảng cáo, ship, mặt bằng, lương…')}
+      ${kpi('Chi phí vận hành', money(m.opex + m.adSpend), m.adSpend ? `gồm ${money(m.adSpend)} quảng cáo Ads` : 'Quảng cáo, mặt bằng, lương…')}
       ${kpi('Lãi ròng', money(m.profit), 'Biên ' + pct(m.revenue ? m.profit / m.revenue : 0) + costWarning(m))}
     </div>
     <div class="grid-2">
       <div class="card span-2"><h3>Doanh thu & chi phí theo ngày</h3><div class="chart-box"><canvas id="ch-fin"></canvas></div></div>
       <div class="card"><h3>Báo cáo lãi lỗ</h3><ul class="list">
         ${step('Doanh thu bán hàng', m.orderRevenue)}${m.otherIncome ? step('Thu khác', m.otherIncome, '+') : ''}
-        ${step('Giá vốn hàng bán', m.cogs, '−')}${step('Phí sàn TMĐT', m.platformFees, '−')}${m.shipCosts ? step('Phí vận chuyển shop trả', m.shipCosts, '−') : ''}
+        ${step('Giá vốn hàng bán', m.cogs, '−')}${m.platformFees ? step('Phí sàn TMĐT', m.platformFees, '−') : ''}${m.shipCosts ? step('Phí vận chuyển shop trả', m.shipCosts, '−') : ''}
         ${step('Lãi gộp', m.grossProfit + m.otherIncome, '', true)}
-        ${step('Chi phí vận hành', m.opex, '−')}
+        ${m.adSpend ? step('Quảng cáo Ads (Shopee, TikTok, Facebook…)', m.adSpend, '−') : ''}
+        ${step('Chi phí vận hành khác', m.opex, '−')}
         ${step('Lãi ròng', m.profit, '', true)}
       </ul>
       <p class="muted small">${costMode()
@@ -1224,13 +1242,15 @@ function campStats(c, r) {
 function channelStats(r) {
   return CHANNELS.map(ch => {
     const ids = new Set(state.campaigns.filter(c => c.channel === ch).map(c => c.id));
-    const spend = state.transactions.filter(t => ids.has(t.campaignId) && inRange(t.date, r)).reduce((s, t) => s + +t.amount, 0);
+    const campSpend = state.transactions.filter(t => ids.has(t.campaignId) && inRange(t.date, r)).reduce((s, t) => s + +t.amount, 0);
+    const ads = adSpendFor(r, ch), spend = campSpend + ads;
     const valid = state.orders.filter(o => isRevenue(o) && inRange(dayOf(o.createdAt), r));
     const chOrders = valid.filter(o => o.channel === ch), attr = valid.filter(o => ids.has(o.campaignId));
-    const attrRevenue = attr.reduce((s, o) => s + orderTotal(o), 0);
+    const attrRevenue = attr.reduce((s, o) => s + orderTotal(o), 0), revenue = chOrders.reduce((s, o) => s + orderTotal(o), 0);
+    // ROAS kênh = toàn bộ doanh thu kênh / toàn bộ chi quảng cáo của kênh (Ads theo ngày + chiến dịch)
     return {
-      ch, spend, orders: chOrders.length, revenue: chOrders.reduce((s, o) => s + orderTotal(o), 0),
-      attrOrders: attr.length, attrRevenue, roas: spend ? attrRevenue / spend : null, cpa: attr.length && spend ? spend / attr.length : null,
+      ch, spend, ads, orders: chOrders.length, revenue,
+      attrOrders: attr.length, attrRevenue, roas: spend ? revenue / spend : null, cpa: chOrders.length && spend ? spend / chOrders.length : null,
       newCust: state.customers.filter(c => c.source === ch && inRange(dayOf(c.createdAt), r)).length,
       running: state.campaigns.filter(c => c.channel === ch && c.stage === 'running').length,
     };
@@ -1268,16 +1288,9 @@ function mktSuggestions(ch) {
 }
 
 function renderMarketing(el) {
-  if (!state.campaigns.length) {
-    el.innerHTML = `<div class="card"><h3>Chưa có chiến dịch marketing</h3>
-      <p class="muted">Tạo chiến dịch để theo dõi luồng triển khai (Ý tưởng → Sản xuất nội dung → Duyệt → Chạy → Đánh giá), ngân sách, và hiệu quả từng kênh tính từ đơn hàng & chi phí thật.</p>
-      <div class="toolbar"><button class="btn primary" data-action="newCampaign">+ Chiến dịch mới</button><button class="btn ghost" data-action="seedMkt">Tạo chiến dịch mẫu để xem thử</button></div></div>`;
-    return;
-  }
   const r = periodRange(ui.mktPeriod), m = metrics(r);
   const mktTx = state.transactions.filter(t => isMktSpend(t) && inRange(t.date, r));
-  const spendAll = mktTx.reduce((s, t) => s + +t.amount, 0);
-  const spendAssigned = mktTx.filter(t => campById(t.campaignId)).reduce((s, t) => s + +t.amount, 0);
+  const spendAll = mktTx.reduce((s, t) => s + +t.amount, 0) + m.adSpend;
   const attr = m.valid.filter(o => campById(o.campaignId)), attrRev = attr.reduce((s, o) => s + orderTotal(o), 0);
   const ch = channelStats(r), shownCh = ch.filter(x => x.spend || x.revenue || x.running);
   const counts = Object.fromEntries(MKT_STAGES.map(s => [s.key, 0]));
@@ -1291,18 +1304,18 @@ function renderMarketing(el) {
     <div class="toolbar">${periodSeg(ui.mktPeriod, 'setMktPeriod')}<span class="grow"></span>
       <button class="btn primary" data-action="newCampaign">+ Chiến dịch mới</button></div>
     <div class="kpis">
-      ${kpi('Chi phí marketing', money(spendAll), spendAll > spendAssigned ? `${money(spendAll - spendAssigned)} chưa gắn chiến dịch` : `${mktTx.length} khoản chi`)}
+      ${kpi('Chi phí quảng cáo', money(spendAll), m.adSpend ? `<a href="#ads">${money(m.adSpend)} Ads theo ngày</a> · ${money(spendAll - m.adSpend)} chiến dịch / khác` : '<a href="#ads">Nhập chi phí Ads theo ngày →</a>')}
+      ${kpi('ROAS tổng', fmtRoas(spendAll ? m.orderRevenue / spendAll : null), 'Doanh thu đơn hàng / chi phí quảng cáo')}
+      ${kpi('Chi phí / đơn (CPA)', m.valid.length && spendAll ? money(spendAll / m.valid.length) : '—', 'Chi phí quảng cáo để có 1 đơn')}
       ${kpi('Doanh thu từ chiến dịch', money(attrRev), `${attr.length} đơn · ${pct(m.orderRevenue ? attrRev / m.orderRevenue : 0)} tổng doanh thu đơn`)}
-      ${kpi('ROAS tổng', fmtRoas(spendAssigned ? attrRev / spendAssigned : null), 'Doanh thu chiến dịch / chi phí')}
-      ${kpi('Chi phí / đơn (CPA)', attr.length ? money(spendAssigned / attr.length) : '—', 'Chi phí để có 1 đơn hàng')}
       ${kpi('Chi MKT / doanh thu', pct(m.revenue ? spendAll / m.revenue : 0), 'Nên giữ dưới 15–20%')}
       ${kpi('Chiến dịch đang chạy', counts.running, `${counts.review} chờ duyệt · ${counts.production + counts.idea} đang chuẩn bị`)}
     </div>
     <div class="grid-2">
       <div class="card span-2"><div class="card-h"><h3>Hiệu quả theo kênh</h3><span class="muted small">ROAS ≥ 4x: hiệu quả cao · 2–4x: ổn · &lt; 2x: cần tối ưu</span></div>
         <div class="chart-box sm"><canvas id="ch-mkt"></canvas></div>
-        <div class="table-wrap" style="margin-top:12px"><table class="tbl static"><thead><tr><th>Kênh</th><th class="num">Chi phí MKT</th><th class="num">Đơn từ CD</th><th class="num">DT từ CD</th><th class="num">ROAS</th><th class="num">CPA</th><th class="num">Tổng DT kênh</th><th class="num">Khách mới</th><th>Đánh giá</th></tr></thead><tbody>
-          ${shownCh.map(x => { const [lbl, col] = roasRating(x.roas); return `<tr><td><b>${esc(x.ch)}</b>${x.running ? `<div class="muted small">${x.running} CD đang chạy</div>` : ''}</td><td class="num">${money(x.spend)}</td><td class="num">${x.attrOrders}</td><td class="num">${money(x.attrRevenue)}</td><td class="num"><b>${fmtRoas(x.roas)}</b></td><td class="num">${x.cpa ? money(x.cpa) : '—'}</td><td class="num">${money(x.revenue)}</td><td class="num">${x.newCust}</td><td><span class="badge" style="--c:${col}">${lbl}</span></td></tr>`; }).join('') || '<tr><td colspan="9" class="empty">Chưa có dữ liệu trong kỳ</td></tr>'}
+        <div class="table-wrap" style="margin-top:12px"><table class="tbl static"><thead><tr><th>Kênh</th><th class="num">Chi phí QC</th><th class="num">Tổng DT kênh</th><th class="num">Đơn</th><th class="num">ROAS</th><th class="num">Chi phí / đơn</th><th class="num">DT từ chiến dịch</th><th class="num">Khách mới</th><th>Đánh giá</th></tr></thead><tbody>
+          ${shownCh.map(x => { const [lbl, col] = roasRating(x.roas); return `<tr><td><b>${esc(x.ch)}</b>${x.running ? `<div class="muted small">${x.running} CD đang chạy</div>` : ''}</td><td class="num">${money(x.spend)}${x.ads && x.spend > x.ads ? `<div class="muted small">Ads ${shortMoney(x.ads)} + CD ${shortMoney(x.spend - x.ads)}</div>` : ''}</td><td class="num">${money(x.revenue)}</td><td class="num">${x.orders}</td><td class="num"><b>${fmtRoas(x.roas)}</b></td><td class="num">${x.cpa ? money(x.cpa) : '—'}</td><td class="num">${x.attrRevenue ? money(x.attrRevenue) + ` <span class="muted small">(${x.attrOrders} đơn)</span>` : '—'}</td><td class="num">${x.newCust}</td><td><span class="badge" style="--c:${col}">${lbl}</span></td></tr>`; }).join('') || '<tr><td colspan="9" class="empty">Chưa có dữ liệu trong kỳ</td></tr>'}
         </tbody></table></div></div>
       <div class="card"><h3>Cảnh báo triển khai</h3><ul class="list">
         ${alerts.map(([lv, msg, c]) => `<li class="clickable alert-${lv}" data-action="viewCampaign" data-id="${c.id}"><span><b>${esc(c.name)}</b><div class="meta">${msg}</div></span></li>`).join('') || '<li class="empty">Mọi chiến dịch đang ổn</li>'}</ul></div>
@@ -1317,7 +1330,7 @@ function renderMarketing(el) {
         <td><b>${esc(c.name)}</b><div class="muted small">${esc(c.format)} · ${esc(c.objective)}</div></td><td>${esc(c.channel)}</td>
         <td>${fmtDay(c.start)}<div class="muted small">→ ${fmtDay(c.end)}</div></td><td>${mktBadge(c.stage)}</td><td>${budgetBar(s.spend, c.budget)}</td>
         <td class="num">${s.orders}</td><td class="num">${money(s.revenue)}</td><td class="num"><b>${fmtRoas(s.roas)}</b></td>
-        <td>${nx ? `<button class="btn sm" data-action="advanceCamp" data-id="${c.id}">→ ${mktStage(nx).label}</button>` : ''}</td></tr>`; }).join('') || '<tr><td colspan="9" class="empty">Không có chiến dịch</td></tr>'}
+        <td>${nx ? `<button class="btn sm" data-action="advanceCamp" data-id="${c.id}">→ ${mktStage(nx).label}</button>` : ''}</td></tr>`; }).join('') || `<tr><td colspan="9" class="empty">${state.campaigns.length ? 'Không có chiến dịch ở giai đoạn này' : 'Chưa có chiến dịch – bấm “+ Chiến dịch mới” để lên kế hoạch, hoặc <a href="#" data-action="seedMkt">tạo chiến dịch mẫu để xem thử</a>'}</td></tr>`}
       </tbody></table></div></div>`;
 
   const canvas = $('#ch-mkt');
@@ -1618,4 +1631,5 @@ document.addEventListener('drop', e => {
 window.addEventListener('hashchange', () => { closeModal(); route(); });
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', route);
 $('#today-label').textContent = new Date().toLocaleDateString('vi-VN', { weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric' });
-route();
+// Chờ các file JS khác (nhập Shopee/SPX, Quảng cáo…) đăng ký xong trang rồi mới vẽ
+document.addEventListener('DOMContentLoaded', route);
