@@ -84,6 +84,10 @@ function nextId(prefix, list, width = 4) {
 }
 const orderTotal = o => o.items.reduce((s, i) => s + i.qty * i.price, 0) + (+o.shippingFee || 0) - (+o.discount || 0);
 const orderFee = o => o.status === 'cancelled' ? 0 : (+o.platformFee || 0);
+// Phí vận chuyển shop tự trả cho hãng (VD: SPX – gồm phí hoàn hàng, phí COD, bảo hiểm); đơn hủy trước khi gửi không tốn phí
+const orderShip = o => o.status === 'cancelled' ? 0 : (+o.shipCost || 0);
+const SPX_PAYERS = ['Người gửi trả phí', 'Người nhận trả'];
+const normPhone = p => { const d = String(p || '').replace(/\D/g, '').replace(/^84(?=\d{9}$)/, ''); return d.length === 9 ? '0' + d : d; };
 // Kênh kèm tên gian hàng (VD: "Shopee · Shop phụ") khi bán trên nhiều shop cùng sàn
 const channelLabel = o => o.shop ? `${o.channel} · ${o.shop}` : o.channel;
 // Dữ liệu mẫu: cờ demo, hoặc dữ liệu mẫu tạo từ bản cũ (trước khi có cờ)
@@ -291,15 +295,16 @@ function metrics(r) {
   const tx = state.transactions.filter(t => inRange(t.date, r));
   const otherIncome = tx.filter(t => t.type === 'income').reduce((s, t) => s + +t.amount, 0);
   const platformFees = orders.reduce((s, o) => s + orderFee(o), 0);
+  const shipCosts = orders.reduce((s, o) => s + orderShip(o), 0);
   const cogs = valid.reduce((s, o) => s + orderCogs(o), 0);
   const missingCostRevenue = valid.reduce((s, o) => s + o.items.filter(i => !itemCost(i)).reduce((a, i) => a + i.qty * i.price, 0), 0);
   const opex = tx.filter(isOpex).reduce((s, t) => s + +t.amount, 0);
   const purchases = tx.filter(t => t.type === 'expense' && t.category === 'Nhập hàng').reduce((s, t) => s + +t.amount, 0);
-  const expense = opex + platformFees + cogs;
+  const expense = opex + platformFees + shipCosts + cogs;
   const revenue = orderRevenue + otherIncome;
   return {
-    orders, valid, tx, orderRevenue, otherIncome, revenue, expense, platformFees, cogs, opex, purchases, missingCostRevenue,
-    grossProfit: orderRevenue - cogs - platformFees, profit: revenue - expense,
+    orders, valid, tx, orderRevenue, otherIncome, revenue, expense, platformFees, shipCosts, cogs, opex, purchases, missingCostRevenue,
+    grossProfit: orderRevenue - cogs - platformFees - shipCosts, profit: revenue - expense,
     newCustomers: state.customers.filter(c => inRange(dayOf(c.createdAt), r)).length,
     badRate: orders.length ? orders.filter(o => !isRevenue(o)).length / orders.length : 0,
     aov: valid.length ? orderRevenue / valid.length : 0,
@@ -312,7 +317,7 @@ function dailySeries(r) {
   state.orders.forEach(o => {
     const k = dayOf(o.createdAt); if (!(k in rev)) return;
     if (isRevenue(o)) rev[k] += orderTotal(o);
-    exp[k] += orderFee(o) + orderCogs(o);
+    exp[k] += orderFee(o) + orderShip(o) + orderCogs(o);
   });
   state.transactions.forEach(t => {
     if (!(t.date in rev)) return;
@@ -469,6 +474,7 @@ function renderOrders(el) {
         .map(c => `<option ${ui.orderChannel === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
       ${ui.orderStatus !== 'all' ? `<button class="btn ghost" data-action="filterStatus" data-s="all">Bỏ lọc: ${statusOf(ui.orderStatus).label} ×</button>` : ''}
       <label class="btn" title="Chọn file Excel xuất từ Kênh Người Bán Shopee → Quản Lý Đơn Hàng → Xuất">Nhập đơn Shopee (Excel)<input type="file" id="shopee-file" accept=".xlsx" hidden></label>
+      <label class="btn" title="Chọn file báo cáo vận đơn tải từ trang quản lý SPX Express">Nhập báo cáo SPX (Excel)<input type="file" id="spx-file" accept=".xlsx" hidden></label>
     </div>
     <div class="card flush"><div class="table-wrap"><table class="tbl">
       <thead><tr><th>Mã đơn</th><th>Khách hàng</th><th>Ngày tạo</th><th>Kênh</th><th class="num">Tổng tiền</th><th>Vận chuyển</th><th>Trạng thái</th><th></th></tr></thead>
@@ -477,6 +483,7 @@ function renderOrders(el) {
   $('#order-q').addEventListener('input', e => { ui.orderQ = e.target.value; fillOrderRows(); });
   $('#order-ch').addEventListener('change', e => { ui.orderChannel = e.target.value; fillOrderRows(); });
   $('#shopee-file').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) importShopeeFile(f); });
+  $('#spx-file').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) importSpxFile(f); });
   fillOrderRows();
 }
 function fillOrderRows() {
@@ -552,20 +559,30 @@ function viewOrder(id) {
     ${o.status === 'cancelled' || o.status === 'returned' ? `<p>${badge(o.status)} <span class="muted small">${timeOf(o.status)}</span></p>` : ''}
     <div class="info-grid">
       <div><span>Khách hàng</span><a class="clickable" data-action="viewCustomer" data-id="${c.id || ''}">${esc(c.name)}</a> · ${esc(c.phone || '')}</div>
-      <div><span>Địa chỉ</span>${esc(c.address || '—')}</div>
+      <div><span>Giao đến</span>${o.ship ? `${esc(o.ship.name)} · ${esc(o.ship.phone)}<br>${esc(joinAddress(o.ship) || '—')}` : esc(c.address || '—')}</div>
       <div><span>Kênh bán · Chiến dịch</span>${esc(channelLabel(o))} ·${campById(o.campaignId) ? `<a class="clickable" data-action="viewCampaign" data-id="${o.campaignId}">${esc(campById(o.campaignId).name)}</a>` : 'Tự nhiên'}</div>
       <div><span>Vận chuyển</span>${esc(o.carrier || '—')} · <b>${esc(o.trackingCode || 'chưa có mã')}</b></div>
       ${o.platform ? `<div><span>Mã đơn ${esc(o.platform)}</span><b>${esc(o.platformOrderId)}</b></div><div><span>Thanh toán · Hình thức giao</span>${esc(o.payment || '—')} · ${esc(o.shippingMethod || '—')}</div>` : ''}
+      ${o.spx ? `<div><span>SPX · COD</span>${o.spx.cod ? 'Thu COD ' + money(o.spx.codAmount) : 'Không thu COD (đã chuyển khoản)'}</div>
+        <div><span>SPX · Phí ship · Đồng kiểm</span>${esc(o.spx.payer || '')} · ${o.spx.weight ? o.spx.weight + ' kg · ' : ''}Cho xem hàng: ${esc(o.spx.coCheck || '—')}</div>` : ''}
       ${o.note ? `<div style="grid-column:1/-1"><span>Ghi chú</span>${esc(o.note)}</div>` : ''}
     </div>
+    ${o.carrier === 'SPX Express' && !o.trackingCode && !closed ? `<div class="spx-hint">
+      <div><b>Tạo vận đơn trên SPX:</b> bấm “Sao chép thông tin SPX” rồi dán đối chiếu khi tạo đơn. Ở ô <b>Mã khách hàng</b> trên SPX, điền <b class="mono">${o.id}</b>
+      để khi nhập báo cáo SPX, app tự gắn mã vận đơn, cập nhật trạng thái giao và phí ship cho đơn này.</div>
+      <button class="btn primary sm" data-action="copySpx" data-id="${o.id}">Sao chép thông tin SPX</button></div>` : ''}
     <div class="table-wrap"><table class="tbl"><thead><tr><th>Sản phẩm</th><th>Size</th><th class="num">SL</th><th class="num">Đơn giá</th><th class="num">Thành tiền</th></tr></thead><tbody>
       ${o.items.map(i => `<tr><td>${esc(i.name)}${i.sku ? ` <span class="chip">${esc(i.sku)}</span>` : ''}</td><td>${esc(i.size)}</td><td class="num">${i.qty}</td><td class="num">${money(i.price)}</td><td class="num">${money(i.qty * i.price)}</td></tr>`).join('')}
       <tr><td colspan="4">Tạm tính · Phí ship · Giảm giá</td><td class="num">${money(sub)} + ${money(o.shippingFee)} − ${money(o.discount)}</td></tr>
       <tr><td colspan="4"><b>Tổng cộng</b></td><td class="num"><b>${money(orderTotal(o))}</b></td></tr>
       ${o.platformFee ? `<tr><td colspan="4">Phí sàn ${esc(o.platform || '')} (cố định + dịch vụ + thanh toán)</td><td class="num">−${money(o.platformFee)}</td></tr>
       <tr><td colspan="4"><b>Thực nhận</b></td><td class="num"><b>${money(orderTotal(o) - o.platformFee)}</b></td></tr>` : ''}
-      ${isRevenue(o) && orderCogs(o) ? `<tr><td colspan="4">Giá vốn hàng${o.items.some(i => !itemCost(i)) ? ' <span class="delta down">(thiếu giá vốn một số SP)</span>' : ''}</td><td class="num">−${money(orderCogs(o))}</td></tr>
-      <tr><td colspan="4"><b>Lãi của đơn</b> <span class="muted small">(sau giá vốn${o.platformFee ? ' & phí sàn' : ''})</span></td><td class="num"><b>${money(orderTotal(o) - orderFee(o) - orderCogs(o))}</b> · ${pct((orderTotal(o) - orderFee(o) - orderCogs(o)) / (orderTotal(o) || 1))}</td></tr>` : ''}
+      ${orderShip(o) ? `<tr><td colspan="4">Phí vận chuyển shop trả${o.spx?.estimated ? ' <span class="muted small">(ước tính – cập nhật khi nhập báo cáo SPX)</span>' : ''}</td><td class="num">−${money(orderShip(o))}</td></tr>` : ''}
+      ${isRevenue(o) && (orderCogs(o) || orderShip(o)) ? (() => {
+        const net = orderTotal(o) - orderFee(o) - orderShip(o) - orderCogs(o);
+        return `${orderCogs(o) ? `<tr><td colspan="4">Giá vốn hàng${o.items.some(i => !itemCost(i)) ? ' <span class="delta down">(thiếu giá vốn một số SP)</span>' : ''}</td><td class="num">−${money(orderCogs(o))}</td></tr>` : ''}
+        <tr><td colspan="4"><b>Lãi của đơn</b> <span class="muted small">(sau ${[orderCogs(o) && 'giá vốn', o.platformFee && 'phí sàn', orderShip(o) && 'phí ship'].filter(Boolean).join(', ')})</span></td><td class="num"><b>${money(net)}</b> · ${pct(net / (orderTotal(o) || 1))}</td></tr>`;
+      })() : ''}
     </tbody></table></div>
     <div class="detail-sec"><h4>Lịch sử tracking</h4>
       <ul class="timeline">${[...o.history].reverse().map(h => `<li style="--c:${statusOf(h.status).color}"><b>${statusOf(h.status).label}</b><time>${fmtDT(h.at)}</time>${h.note ? `<p>${esc(h.note)}</p>` : ''}</li>`).join('')}</ul>
@@ -573,6 +590,8 @@ function viewOrder(id) {
     <div class="row-actions">
       ${nx ? `<button class="btn primary" data-action="advanceOrderModal" data-id="${o.id}">Chuyển sang: ${statusOf(nx).label}</button>` : ''}
       <button class="btn" data-action="editTracking" data-id="${o.id}">Cập nhật mã vận đơn</button>
+      ${o.carrier === 'SPX Express' && (o.trackingCode || closed) ? `<button class="btn" data-action="copySpx" data-id="${o.id}">Sao chép thông tin SPX</button>` : ''}
+      ${o.carrier === 'SPX Express' && o.trackingCode ? `<a class="btn" href="https://spx.vn/track?${encodeURIComponent(o.trackingCode)}" target="_blank" rel="noopener">Tra cứu SPX ↗</a>` : ''}
       ${!closed ? `<button class="btn danger" data-action="cancelOrder" data-id="${o.id}">Hủy đơn</button>` : ''}
       ${o.status === 'shipping' || o.status === 'delivered' ? `<button class="btn danger" data-action="returnOrder" data-id="${o.id}">Ghi nhận hoàn trả</button>` : ''}
       <span class="grow" style="flex:1"></span>
@@ -588,70 +607,139 @@ function itemRow(it = {}) {
     <input name="iprice" type="number" min="0" step="1000" value="${it.price ?? ''}" placeholder="Đơn giá">
     <button type="button" class="icon-btn" data-remove-row aria-label="Xóa dòng">×</button></div>`;
 }
+// Địa chỉ theo đúng các ô của SPX: Tỉnh/thành · Quận, huyện (cũ)/Phường, xã (mới) · Phường, xã (cũ) · Địa chỉ chi tiết
+const joinAddress = a => [a.street, a.ward, a.district, a.province].map(s => (s || '').trim()).filter(Boolean).join(', ');
 function newOrder(prefCustomerId) {
   const custs = state.customers.slice().sort((a, b) => a.name.localeCompare(b.name, 'vi'));
+  // Gợi ý sản phẩm từ các đơn đã bán (tên + giá gần nhất), kèm danh mục mẫu
+  const lastPrice = new Map();
+  state.orders.slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt)).forEach(o => o.items.forEach(i => i.price && lastPrice.set(i.name, i.price)));
+  if (isDemoData()) PRODUCTS.forEach(([n, p]) => lastPrice.has(n) || lastPrice.set(n, p));
+  const defChannel = state.demo ? 'Website' : 'Facebook', defCarrier = state.demo ? 'GHN' : 'SPX Express';
   openModal('Tạo đơn hàng mới', `
     <form class="form" id="f-order">
       <label class="full">Khách hàng<select name="customerId">
         <option value="__new">+ Khách hàng mới</option>
         ${custs.map(c => `<option value="${c.id}" ${c.id === prefCustomerId ? 'selected' : ''}>${esc(c.name)} – ${esc(c.phone)}</option>`).join('')}
       </select></label>
-      <div class="full form" id="new-cust" style="padding:0">
-        <label>Tên khách<input name="cname"></label>
-        <label>Số điện thoại<input name="cphone" type="tel"></label>
-        <label class="full">Địa chỉ<input name="caddress"></label>
-      </div>
-      <div class="section-t">Sản phẩm</div>
+      <div class="section-t">Người nhận</div>
+      <label>Tên người nhận<input name="rname" required></label>
+      <label>Số điện thoại<input name="rphone" type="tel" inputmode="tel" required></label>
+      <label>Tỉnh, thành<input name="province" placeholder="VD: Hà Nội"></label>
+      <label>Quận, huyện (cũ) / Phường, xã (mới)<input name="district"></label>
+      <label>Phường, xã (cũ)<input name="ward" placeholder="Bỏ trống nếu dùng địa chỉ mới"></label>
+      <label>Địa chỉ chi tiết<input name="street" placeholder="Số nhà, ngõ, đường…"></label>
+      <div class="section-t">Sản phẩm <span class="muted small">(ghi rõ màu, VD: “Bộ sơ mi lụa – màu Trắng”)</span></div>
       <div class="full" id="items">${itemRow()}</div>
       <div class="full"><button type="button" class="btn sm" id="add-item">+ Thêm sản phẩm</button></div>
-      <label>Kênh bán<select name="channel">${opts(CHANNELS, 'Website')}</select></label>
-      <label>Đơn vị vận chuyển<select name="carrier">${opts(CARRIERS, 'GHN')}</select></label>
+      <label>Kênh bán<select name="channel">${opts(CHANNELS, defChannel)}</select></label>
+      <label>Đơn vị vận chuyển<select name="carrier">${opts(CARRIERS, defCarrier)}</select></label>
       <label class="full">Đến từ chiến dịch marketing<select name="campaignId"><option value="">— Không / khách tự nhiên —</option>${campaignOptions('')}</select></label>
-      <label>Phí ship (₫)<input name="shippingFee" type="number" min="0" step="1000" value="30000"></label>
+      <label>Phí ship thu của khách (₫)<input name="shippingFee" type="number" min="0" step="1000" value="${state.demo ? 30000 : 0}"></label>
       <label>Giảm giá (₫)<input name="discount" type="number" min="0" step="1000" value="0"></label>
-      <label class="full">Ghi chú<textarea name="note"></textarea></label>
-      <div class="total-line"><span>Tổng cộng</span><b id="o-total">0 ₫</b></div>
+      <div class="total-line"><span>Tổng tiền khách trả</span><b id="o-total">0 ₫</b></div>
+      <div class="full form" id="spx-box" style="padding:0">
+        <div class="section-t">Thông tin vận đơn SPX</div>
+        <label>Thu COD<select name="cod"><option value="1">Có – thu hộ tiền hàng</option><option value="0">Không – khách đã chuyển khoản</option></select></label>
+        <label>Số tiền COD (₫)<input name="codAmount" type="number" min="0" step="1000"></label>
+        <label>Người trả phí ship<select name="payer">${opts(SPX_PAYERS, SPX_PAYERS[0])}</select></label>
+        <label>Phí ship shop trả – ước tính (₫)<input name="shipCost" type="number" min="0" step="100" value="22000"></label>
+        <label>Tổng khối lượng (kg)<input name="weight" type="number" min="0" step="0.1" value="0.4"></label>
+        <label>Cho xem hàng / Đồng kiểm<select name="coCheck"><option>Có</option><option>Không</option></select></label>
+        <label class="full">Hướng dẫn giao hàng<input name="instruction" placeholder="VD: Gọi trước khi giao, giao giờ hành chính…"></label>
+      </div>
+      <label class="full">Ghi chú nội bộ<textarea name="note"></textarea></label>
       <div class="form-actions"><button type="button" class="btn ghost" data-action="closeModal">Hủy</button><button class="btn primary">Tạo đơn</button></div>
     </form>
-    <datalist id="product-list">${PRODUCTS.map(p => `<option value="${p[0]}">`).join('')}</datalist>`, body => {
+    <datalist id="product-list">${[...lastPrice.keys()].slice(-80).map(n => `<option value="${esc(n)}">`).join('')}</datalist>`, body => {
     const f = $('#f-order', body);
-    const toggleNew = () => { $('#new-cust', body).style.display = f.customerId.value === '__new' ? '' : 'none'; };
-    const calc = () => {
+    let codTouched = false;
+    const total = () => {
       const fd = new FormData(f), q = fd.getAll('iqty'), p = fd.getAll('iprice');
-      const sub = q.reduce((s, x, i) => s + (+x || 0) * (+p[i] || 0), 0);
-      $('#o-total', body).textContent = money(sub + (+fd.get('shippingFee') || 0) - (+fd.get('discount') || 0));
+      return q.reduce((s, x, i) => s + (+x || 0) * (+p[i] || 0), 0) + (+fd.get('shippingFee') || 0) - (+fd.get('discount') || 0);
     };
-    toggleNew();
-    f.customerId.addEventListener('change', toggleNew);
+    const calc = () => {
+      const t = total();
+      $('#o-total', body).textContent = money(t);
+      if (!codTouched) f.codAmount.value = f.cod.value === '1' ? t : 0;
+    };
+    const fillCustomer = () => {
+      const c = custById(f.customerId.value) || {};
+      f.rname.value = c.name || ''; f.rphone.value = c.phone || '';
+      f.province.value = c.province || ''; f.district.value = c.district || ''; f.ward.value = c.ward || '';
+      f.street.value = c.street || (c.province ? '' : c.address || '');
+    };
+    const toggleSpx = () => { $('#spx-box', body).style.display = f.carrier.value === 'SPX Express' ? '' : 'none'; };
+    fillCustomer(); toggleSpx(); calc();
+    f.customerId.addEventListener('change', fillCustomer);
+    f.carrier.addEventListener('change', toggleSpx);
+    f.cod.addEventListener('change', () => { codTouched = false; calc(); });
+    f.codAmount.addEventListener('input', () => { codTouched = true; });
     $('#add-item', body).addEventListener('click', () => { $('#items', body).insertAdjacentHTML('beforeend', itemRow()); });
     $('#items', body).addEventListener('click', e => {
       if (e.target.matches('[data-remove-row]') && $$('.item-row', body).length > 1) { e.target.closest('.item-row').remove(); calc(); }
     });
     f.addEventListener('input', e => {
       if (e.target.name === 'iname') {
-        const p = PRODUCTS.find(x => x[0] === e.target.value), price = e.target.closest('.item-row').querySelector('[name=iprice]');
-        if (p && !price.value) price.value = p[1];
+        const price = e.target.closest('.item-row').querySelector('[name=iprice]');
+        if (lastPrice.has(e.target.value) && !price.value) price.value = lastPrice.get(e.target.value);
       }
-      calc();
+      if (e.target.name !== 'codAmount') calc();
     });
     f.addEventListener('submit', e => {
       e.preventDefault();
-      const fd = new FormData(f);
+      const fd = new FormData(f), g = k => String(fd.get(k) || '').trim();
       const names = fd.getAll('iname'), sizes = fd.getAll('isize'), qtys = fd.getAll('iqty'), prices = fd.getAll('iprice');
       const items = names.map((n, i) => ({ name: n.trim(), size: sizes[i], qty: Math.max(1, +qtys[i] || 1), price: +prices[i] || 0 })).filter(i => i.name);
       if (!items.length) { toast('Thêm ít nhất 1 sản phẩm'); return; }
+      const addr = { province: g('province'), district: g('district'), ward: g('ward'), street: g('street') };
       let cid = fd.get('customerId');
       if (cid === '__new') {
-        const name = fd.get('cname').trim();
-        if (!name) { toast('Nhập tên khách hàng'); return; }
-        const c = { id: nextId('KH', state.customers, 3), name, phone: fd.get('cphone').trim(), email: '', address: fd.get('caddress').trim(), source: fd.get('channel'), note: '', createdAt: new Date().toISOString() };
-        state.customers.push(c); cid = c.id;
+        const phone = normPhone(g('rphone')), dup = phone && state.customers.find(c => normPhone(c.phone) === phone);
+        if (dup) cid = dup.id;   // SĐT đã có → dùng lại khách cũ, không tạo trùng
+        else {
+          const c = { id: nextId('KH', state.customers, 3), name: g('rname'), phone: g('rphone'), email: '', ...addr, address: joinAddress(addr), source: fd.get('channel'), note: '', createdAt: new Date().toISOString() };
+          state.customers.push(c); cid = c.id;
+        }
       }
-      const now = new Date().toISOString(), id = nextId('DH', state.orders);
-      state.orders.push({ id, customerId: cid, items, shippingFee: +fd.get('shippingFee') || 0, discount: +fd.get('discount') || 0, channel: fd.get('channel'), campaignId: fd.get('campaignId') || '', carrier: fd.get('carrier'), trackingCode: '', status: 'new', note: fd.get('note').trim(), createdAt: now, history: [{ status: 'new', at: now, note: 'Tạo đơn hàng' }] });
+      const c = custById(cid);
+      if (c && !c.province && addr.province) Object.assign(c, addr, { address: joinAddress(addr) });   // lưu địa chỉ cho lần sau
+      const now = new Date().toISOString(), id = nextId('DH', state.orders), isSpx = fd.get('carrier') === 'SPX Express';
+      state.orders.push({
+        id, customerId: cid, items, shippingFee: +fd.get('shippingFee') || 0, discount: +fd.get('discount') || 0, channel: fd.get('channel'),
+        campaignId: fd.get('campaignId') || '', carrier: fd.get('carrier'), trackingCode: '', status: 'new', note: g('note'), createdAt: now,
+        history: [{ status: 'new', at: now, note: 'Tạo đơn hàng' }],
+        ship: { name: g('rname'), phone: g('rphone'), ...addr },
+        shipCost: isSpx && fd.get('payer') === SPX_PAYERS[0] ? +fd.get('shipCost') || 0 : 0,
+        spx: isSpx ? { cod: fd.get('cod') === '1', codAmount: fd.get('cod') === '1' ? +fd.get('codAmount') || 0 : 0, payer: fd.get('payer'), weight: +fd.get('weight') || 0, coCheck: fd.get('coCheck'), instruction: g('instruction'), estimated: true } : null,
+      });
       save(); closeModal(); toast('Đã tạo đơn ' + id); rerender();
+      viewOrder(id);
     });
   });
+}
+
+// Văn bản để dán / đối chiếu khi tạo vận đơn trên SPX. Ô “Mã khách hàng” = mã đơn của app để liên kết khi nhập báo cáo SPX
+function spxText(o) {
+  const c = custById(o.customerId) || {}, s = o.ship || { name: c.name, phone: c.phone, province: c.province, district: c.district, ward: c.ward, street: c.street || c.address };
+  const p = o.spx || {}, n = o.items.reduce((a, i) => a + i.qty, 0) || 1, w = (p.weight || 0.4 * n) / n;
+  return [
+    `Mã khách hàng: ${o.id}`,
+    `Tên người nhận: ${s.name || ''}`, `Số điện thoại: ${s.phone || ''}`,
+    `Tỉnh, thành: ${s.province || ''}`, `Quận, huyện (cũ) / Phường, xã (mới): ${s.district || ''}`, `Phường, xã (cũ): ${s.ward || ''}`, `Địa chỉ chi tiết: ${s.street || ''}`,
+    'Tên sản phẩm, số lượng, giá tiền:',
+    ...o.items.map(i => `${i.name}${i.size && i.size !== '—' && !/size/i.test(i.name) ? ' - size ' + i.size : ''},${w.toFixed(3)}kg,${i.price},${i.qty}`),
+    `Thu COD: ${p.cod === false ? 'Không' : 'Có'}${p.cod === false ? '' : ' – ' + (p.codAmount ?? orderTotal(o))}`,
+    `Giá trị đơn hàng: ${orderTotal(o)}`, `Tổng khối lượng: ${(p.weight || 0.4 * n).toFixed(1)} kg`,
+    `Phương thức thanh toán: ${p.payer || SPX_PAYERS[0]}`, `Cho xem hàng/Đồng kiểm: ${p.coCheck || 'Có'}`,
+    p.instruction ? `Hướng dẫn giao hàng: ${p.instruction}` : '',
+  ].filter(Boolean).join('\n');
+}
+async function copySpx(id) {
+  const o = orderById(id); if (!o) return;
+  const text = spxText(o);
+  try { await navigator.clipboard.writeText(text); toast('Đã sao chép – dán sang SPX, nhớ điền Mã khách hàng ' + o.id); }
+  catch (e) { openModal('Thông tin tạo vận đơn SPX', `<textarea style="width:100%;min-height:320px">${esc(text)}</textarea>`); }
 }
 
 /* ---------- View: Workflow ---------- */
@@ -718,7 +806,7 @@ function applyTemplate(i) {
 function renderFinance(el) {
   const r = periodRange(ui.finPeriod), m = metrics(r);
   const expCats = sumBy(m.tx.filter(isOpex), t => t.category, t => +t.amount);
-  [['Giá vốn hàng bán', m.cogs], ['Phí sàn TMĐT', m.platformFees]].forEach(([k, v]) => {
+  [['Giá vốn hàng bán', m.cogs], ['Phí sàn TMĐT', m.platformFees], ['Vận chuyển', m.shipCosts]].forEach(([k, v]) => {
     if (!v) return;
     const row = expCats.find(c => c[0] === k);
     if (row) row[1] += v; else expCats.push([k, v]);
@@ -730,7 +818,7 @@ function renderFinance(el) {
   const byCh = chKeys.map(ch => {
     const os = m.orders.filter(o => channelLabel(o) === ch);
     const rev = os.filter(isRevenue).reduce((s, o) => s + orderTotal(o), 0);
-    const fee = os.reduce((s, o) => s + orderFee(o), 0);
+    const fee = os.reduce((s, o) => s + orderFee(o) + orderShip(o), 0);
     const cogs = os.reduce((s, o) => s + orderCogs(o), 0);
     const ids = new Set(state.campaigns.filter(c => c.channel === ch).map(c => c.id));
     const mkt = m.tx.filter(t => t.type === 'expense' && ids.has(t.campaignId)).reduce((s, t) => s + +t.amount, 0);
@@ -745,7 +833,7 @@ function renderFinance(el) {
       <button class="btn primary" data-action="newTx" data-type="expense">+ Ghi chi phí</button></div>
     <div class="kpis">
       ${kpi('Doanh thu', money(m.revenue), `${m.valid.length} đơn hợp lệ${m.otherIncome ? ' · thu khác ' + money(m.otherIncome) : ''}`)}
-      ${kpi('Lãi gộp', money(m.grossProfit), `Sau giá vốn & phí sàn · biên ${pct(m.orderRevenue ? m.grossProfit / m.orderRevenue : 0)}`)}
+      ${kpi('Lãi gộp', money(m.grossProfit), `Sau giá vốn, phí sàn & ship · biên ${pct(m.orderRevenue ? m.grossProfit / m.orderRevenue : 0)}`)}
       ${kpi('Chi phí vận hành', money(m.opex), 'Quảng cáo, ship, mặt bằng, lương…')}
       ${kpi('Lãi ròng', money(m.profit), 'Biên ' + pct(m.revenue ? m.profit / m.revenue : 0) + costWarning(m))}
     </div>
@@ -753,7 +841,7 @@ function renderFinance(el) {
       <div class="card span-2"><h3>Doanh thu & chi phí theo ngày</h3><div class="chart-box"><canvas id="ch-fin"></canvas></div></div>
       <div class="card"><h3>Báo cáo lãi lỗ</h3><ul class="list">
         ${step('Doanh thu bán hàng', m.orderRevenue)}${m.otherIncome ? step('Thu khác', m.otherIncome, '+') : ''}
-        ${step('Giá vốn hàng bán', m.cogs, '−')}${step('Phí sàn TMĐT', m.platformFees, '−')}
+        ${step('Giá vốn hàng bán', m.cogs, '−')}${step('Phí sàn TMĐT', m.platformFees, '−')}${m.shipCosts ? step('Phí vận chuyển shop trả', m.shipCosts, '−') : ''}
         ${step('Lãi gộp', m.grossProfit + m.otherIncome, '', true)}
         ${step('Chi phí vận hành', m.opex, '−')}
         ${step('Lãi ròng', m.profit, '', true)}
@@ -768,7 +856,7 @@ function renderFinance(el) {
           <li><span>Lãi ròng TB mỗi ngày</span><b>${money(m.profit / (daysBetween(r.start, r.end) + 1))}</b></li>
         </ul></div>
       <div class="card span-2 flush"><div class="card-h" style="padding:14px 16px 0"><h3>Lợi nhuận theo kênh bán</h3><span class="muted small">Chưa trừ chi phí chung (mặt bằng, lương…)</span></div>
-        <div class="table-wrap"><table class="tbl static"><thead><tr><th>Kênh</th><th class="num">Đơn</th><th class="num">Doanh thu</th><th class="num">Giá vốn</th><th class="num">Phí sàn</th><th class="num">Chi marketing</th><th class="num">Còn lại</th><th class="num">% còn lại</th></tr></thead><tbody>
+        <div class="table-wrap"><table class="tbl static"><thead><tr><th>Kênh</th><th class="num">Đơn</th><th class="num">Doanh thu</th><th class="num">Giá vốn</th><th class="num">Phí sàn + ship</th><th class="num">Chi marketing</th><th class="num">Còn lại</th><th class="num">% còn lại</th></tr></thead><tbody>
           ${byCh.map(x => `<tr><td><b>${esc(x.ch)}</b></td><td class="num">${x.n}</td><td class="num">${money(x.rev)}</td><td class="num">${x.cogs ? '−' + money(x.cogs) : '—'}</td><td class="num">${x.fee ? '−' + money(x.fee) : '—'}</td><td class="num">${x.mkt ? '−' + money(x.mkt) : '—'}</td><td class="num"><b>${money(x.net)}</b></td><td class="num">${x.rev ? pct(x.net / x.rev) : '—'}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">Chưa có dữ liệu</td></tr>'}
         </tbody></table></div></div>
     </div>
@@ -1407,6 +1495,7 @@ const ACTIONS = {
   advanceOrder: d => advanceOrder(d.id, false),
   advanceOrderModal: d => advanceOrder(d.id, true),
   editTracking: d => trackingModal(orderById(d.id), false),
+  copySpx: d => copySpx(d.id),
   cancelOrder: d => { const o = orderById(d.id); const why = prompt('Lý do hủy đơn?', 'Khách đổi ý'); if (why === null) return; setOrderStatus(o, 'cancelled', why); toast('Đã hủy ' + o.id); rerender(); viewOrder(o.id); },
   returnOrder: d => { const o = orderById(d.id); const why = prompt('Lý do hoàn trả?', 'Không vừa size'); if (why === null) return; setOrderStatus(o, 'returned', why); toast('Đã ghi nhận hoàn trả ' + o.id); rerender(); viewOrder(o.id); },
   deleteOrder: d => { if (!confirm(`Xóa vĩnh viễn đơn ${d.id}?`)) return; state.orders = state.orders.filter(o => o.id !== d.id); save(); closeModal(); rerender(); },

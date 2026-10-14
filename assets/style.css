@@ -239,6 +239,13 @@ textarea { resize: vertical; min-height: 64px; }
 }
 .toast.show { opacity: 1; transform: translateX(-50%); }
 
+/* ---------- SPX ---------- */
+.spx-hint { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; margin: 0 0 14px; padding: 12px 14px;
+  border-radius: 10px; background: color-mix(in srgb, #ee4d2d 9%, var(--panel)); border: 1px solid color-mix(in srgb, #ee4d2d 30%, var(--line)); font-size: 13px; }
+.spx-hint > div { flex: 1; min-width: 220px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+a.btn { text-decoration: none; display: inline-block; }
+
 /* ---------- Sản phẩm & giá vốn ---------- */
 .cost-input { width: 120px; text-align: right; padding: 5px 8px; font-variant-numeric: tabular-nums; }
 .cost-input:placeholder-shown { border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
