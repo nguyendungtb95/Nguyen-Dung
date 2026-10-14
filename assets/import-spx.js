@@ -62,9 +62,8 @@ function parseSpxRows(rows) {
     const paid = cod || (itemsTotal ? Math.min(value || itemsTotal, itemsTotal) : 0);
     const status = spxStatus(get(r, 'status'));
     if (!paid && !itemsTotal) { skipped.push({ tracking, reason: (items[0]?.name || 'Không có giá trị bán') }); return null; }
-    // Khớp tổng tiền: phần chênh thấp hơn = giảm giá; cao hơn = phụ thu ghi thành 1 dòng
-    let discount = Math.max(0, itemsTotal - paid);
-    if (paid > itemsTotal) items.push({ name: 'Chênh lệch COD so với danh sách hàng', size: '—', qty: 1, price: paid - itemsTotal });
+    // Khớp tổng tiền: tiền thu thấp hơn giá hàng = giảm giá; cao hơn = phụ thu của đơn (không phải sản phẩm)
+    const discount = Math.max(0, itemsTotal - paid), adjust = Math.max(0, paid - itemsTotal);
     const senderPays = !/người nhận/i.test(get(r, 'payer'));
     const fee = shopeeNum(get(r, 'fee')) || shopeeNum(get(r, 'estFee'));
     const shipCost = senderPays ? fee + shopeeNum(get(r, 'insurance')) + shopeeNum(get(r, 'codFee')) + shopeeNum(get(r, 'returnFee')) : 0;
@@ -72,7 +71,7 @@ function parseSpxRows(rows) {
     const pickup = shopeeDate(get(r, 'pickup')), deliv = shopeeDate(get(r, 'delivered'));
     const ref = get(r, 'ref').trim();
     return {
-      tracking, ref: ref && ref !== '-' ? ref : '', status, items, discount, shipCost, created, pickup, deliv,
+      tracking, ref: ref && ref !== '-' ? ref : '', status, items, discount, adjust, shipCost, created, pickup, deliv,
       link: get(r, 'link') || 'https://spx.vn/track?' + tracking,
       failReason: get(r, 'failReason'), statusText: get(r, 'status'),
       ship: { name: get(r, 'name'), phone: get(r, 'phone'), province: get(r, 'province'), district: get(r, 'district'), ward: get(r, 'ward'), street: get(r, 'street') },
@@ -113,7 +112,7 @@ async function importSpxFile(file) {
   const match = p => byTracking.get(p.tracking.toUpperCase()) || (p.ref && orderById(p.ref)) || null;
   const linked = list.filter(match), fresh = list.filter(p => !match(p));
   const valid = list.filter(p => p.status !== 'cancelled' && p.status !== 'returned');
-  const revenue = valid.reduce((s, p) => s + p.items.reduce((a, i) => a + i.qty * i.price, 0) - p.discount, 0);
+  const revenue = valid.reduce((s, p) => s + p.items.reduce((a, i) => a + i.qty * i.price, 0) - p.discount + p.adjust, 0);
   const shipCost = list.filter(p => p.status !== 'cancelled').reduce((s, p) => s + p.shipCost, 0);
   const byStatus = STATUSES.map(s => [s, list.filter(p => p.status === s.key).length]).filter(x => x[1]);
   const days = list.map(p => ymd(p.created)).sort();
@@ -157,7 +156,7 @@ async function importSpxFile(file) {
             spx: { ...(old.spx || {}), ...p.spx }, ship: old.ship || p.ship,
             history: fromSpx ? spxHistory(p) : spxHistory(p, old.history.filter(h => h.status !== 'cancelled' || p.status === 'cancelled')),
           });
-          if (fromSpx) Object.assign(old, { items: p.items, discount: p.discount });
+          if (fromSpx) Object.assign(old, { items: p.items, discount: p.discount, adjust: p.adjust });
           nUpd++; return;
         }
         const phone = normPhone(p.ship.phone);
@@ -169,7 +168,7 @@ async function importSpxFile(file) {
           state.customers.push(c); if (phone) custByPhone.set(phone, c);
         } else if (!c.province && p.ship.province) Object.assign(c, { province: p.ship.province, district: p.ship.district, ward: p.ship.ward, street: p.ship.street, address: joinAddress(p.ship) });
         const o = {
-          id: nextId('DH', state.orders), customerId: c.id, items: p.items, shippingFee: 0, discount: p.discount, channel, campaignId: '',
+          id: nextId('DH', state.orders), customerId: c.id, items: p.items, shippingFee: 0, discount: p.discount, adjust: p.adjust, channel, campaignId: '',
           carrier: 'SPX Express', trackingCode: p.tracking, trackingLink: p.link, status: p.status, note: '', createdAt: p.created.toISOString(),
           history: spxHistory(p), ship: p.ship, shipCost: p.shipCost, spx: p.spx, source: 'spx',
         };

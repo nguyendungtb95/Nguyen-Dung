@@ -82,7 +82,8 @@ function nextId(prefix, list, width = 4) {
   const max = list.reduce((m, x) => { const r = re.exec(String(x.id)); return r ? Math.max(m, +r[1]) : m; }, 0);
   return prefix + pad(max + 1, width);
 }
-const orderTotal = o => o.items.reduce((s, i) => s + i.qty * i.price, 0) + (+o.shippingFee || 0) - (+o.discount || 0);
+// adjust = phụ thu (VD tiền COD SPX cao hơn giá trong danh sách hàng) – cộng vào đơn, không phải sản phẩm
+const orderTotal = o => o.items.reduce((s, i) => s + i.qty * i.price, 0) + (+o.shippingFee || 0) + (+o.adjust || 0) - (+o.discount || 0);
 const orderFee = o => o.status === 'cancelled' ? 0 : (+o.platformFee || 0);
 // Phí vận chuyển shop tự trả cho hãng (VD: SPX – gồm phí hoàn hàng, phí COD, bảo hiểm); đơn hủy trước khi gửi không tốn phí
 const orderShip = o => o.status === 'cancelled' ? 0 : (+o.shipCost || 0);
@@ -127,17 +128,36 @@ function toast(msg) {
 /* ---------- Lưu trữ ---------- */
 let state = load();
 function load() {
-  try {
-    const raw = localStorage.getItem(STORE_KEY);
-    if (raw) { const d = JSON.parse(raw); if (d && Array.isArray(d.orders)) return normalize(d); }
-  } catch (e) { /* bỏ qua, dùng dữ liệu mẫu */ }
+  let raw = null;
+  try { raw = localStorage.getItem(STORE_KEY); } catch (e) { /* trình duyệt chặn lưu trữ */ }
+  if (raw) {
+    try { const d = JSON.parse(raw); if (d && Array.isArray(d.orders)) return normalize(d); }
+    catch (e) {
+      // KHÔNG ghi đè dữ liệu cũ: giữ một bản sao dự phòng để khôi phục được
+      console.error('Lỗi đọc dữ liệu', e);
+      try { localStorage.setItem(STORE_KEY + '-du-phong-' + Date.now(), raw); } catch (_) { }
+      setTimeout(() => alert('Không đọc được dữ liệu đã lưu. Một bản sao dự phòng đã được giữ lại trong trình duyệt – đừng xóa dữ liệu, hãy báo lại để được hỗ trợ khôi phục.'), 300);
+    }
+  }
   const d = seed();
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(d)); } catch (e) { }
+  if (!raw) { try { localStorage.setItem(STORE_KEY, JSON.stringify(d)); } catch (e) { } }
   return d;
+}
+// Bản cũ ghi phần chênh COD (SPX) thành 1 "sản phẩm" → chuyển sang phụ thu của đơn
+function migrateOrders(orders) {
+  // Hằng đặt trong hàm: load() chạy trước các khai báo const ở cấp file
+  const PSEUDO_ITEM = 'Chênh lệch COD so với danh sách hàng';
+  orders.forEach(o => {
+    const extra = (o.items || []).filter(i => i.name === PSEUDO_ITEM);
+    if (!extra.length) return;
+    o.adjust = (+o.adjust || 0) + extra.reduce((s, i) => s + i.qty * i.price, 0);
+    o.items = o.items.filter(i => i.name !== PSEUDO_ITEM);
+  });
+  return orders;
 }
 function normalize(d) {
   return {
-    orders: d.orders || [], customers: d.customers || [], tasks: d.tasks || [],
+    orders: migrateOrders(d.orders || []), customers: d.customers || [], tasks: d.tasks || [],
     transactions: d.transactions || [], careLogs: d.careLogs || [], campaigns: d.campaigns || [],
     // Chi phí quảng cáo theo ngày: adSpend[YYYY-MM-DD][mã tài khoản QC] = số tiền
     adAccounts: Array.isArray(d.adAccounts) ? d.adAccounts : [], adSpend: d.adSpend && typeof d.adSpend === 'object' ? d.adSpend : {},
@@ -633,6 +653,7 @@ function viewOrder(id) {
     <div class="table-wrap"><table class="tbl"><thead><tr><th>Sản phẩm</th><th>Size</th><th class="num">SL</th><th class="num">Đơn giá</th><th class="num">Thành tiền</th></tr></thead><tbody>
       ${o.items.map(i => `<tr><td>${esc(i.name)}${i.sku ? ` <span class="chip">${esc(i.sku)}</span>` : ''}</td><td>${esc(i.size)}</td><td class="num">${i.qty}</td><td class="num">${money(i.price)}</td><td class="num">${money(i.qty * i.price)}</td></tr>`).join('')}
       <tr><td colspan="4">Tạm tính · Phí ship · Giảm giá</td><td class="num">${money(sub)} + ${money(o.shippingFee)} − ${money(o.discount)}</td></tr>
+      ${o.adjust ? `<tr><td colspan="4">Phụ thu <span class="muted small">(tiền COD cao hơn giá trong danh sách hàng SPX)</span></td><td class="num">+${money(o.adjust)}</td></tr>` : ''}
       <tr><td colspan="4"><b>Tổng cộng</b></td><td class="num"><b>${money(orderTotal(o))}</b></td></tr>
       ${o.platformFee ? `<tr><td colspan="4">Phí sàn ${esc(o.platform || '')} (cố định + dịch vụ + thanh toán)</td><td class="num">−${money(o.platformFee)}</td></tr>
       <tr><td colspan="4"><b>Thực nhận</b></td><td class="num"><b>${money(orderTotal(o) - o.platformFee)}</b></td></tr>` : ''}
