@@ -38,7 +38,7 @@ const WF_TEMPLATES = [
   { name: 'Xử lý đổi trả', tasks: ['Xác nhận yêu cầu đổi trả với khách', 'Nhận hàng hoàn & kiểm tra', 'Hoàn tiền / gửi hàng đổi', 'Ghi lý do vào hồ sơ khách'] },
   { name: 'Chăm sóc KH cuối tuần', tasks: ['Lọc khách VIP chưa mua 30 ngày', 'Gửi ưu đãi riêng', 'Gọi xin feedback đơn gần nhất'] },
 ];
-const PERIODS = [['today', 'Hôm nay'], ['7d', '7 ngày'], ['30d', '30 ngày'], ['month', 'Tháng này']];
+const PERIODS = [['today', 'Hôm nay'], ['yesterday', 'Hôm qua'], ['7d', '7 ngày'], ['30d', '30 ngày'], ['month', 'Tháng này'], ['lastmonth', 'Tháng trước'], ['custom', 'Tùy chọn…']];
 const MKT_STAGES = [
   { key: 'idea',       label: 'Ý tưởng',           color: '#64748b' },
   { key: 'production', label: 'Sản xuất nội dung', color: '#7c3aed' },
@@ -278,14 +278,20 @@ function seedMarketing(d) {
 function periodRange(p) {
   const now = new Date(), end = todayStr();
   if (p === 'today') return { start: end, end };
+  if (p === 'yesterday') { const y = ymd(addDays(now, -1)); return { start: y, end: y }; }
   if (p === '7d') return { start: ymd(addDays(now, -6)), end };
   if (p === 'month') return { start: ymd(new Date(now.getFullYear(), now.getMonth(), 1)), end };
+  if (p === 'lastmonth') return { start: ymd(new Date(now.getFullYear(), now.getMonth() - 1, 1)), end: ymd(new Date(now.getFullYear(), now.getMonth(), 0)) };
+  if (p === 'custom') return { ...ui.customRange };
+  if (p === 'all') return { start: '2000-01-01', end };
   return { start: ymd(addDays(now, -29)), end };
 }
 function prevRange(r) {
   const n = daysBetween(r.start, r.end) + 1, s = parseDay(r.start);
   return { start: ymd(addDays(s, -n)), end: ymd(addDays(s, -1)) };
 }
+// Biểu đồ theo ngày: khoảng ngắn hơn 7 ngày (hôm nay, hôm qua…) thì vẽ 7 ngày kết thúc ở ngày cuối
+const chartRange = r => daysBetween(r.start, r.end) < 6 ? { start: ymd(addDays(parseDay(r.end), -6)), end: r.end } : r;
 const inRange = (day, r) => day >= r.start && day <= r.end;
 
 function metrics(r) {
@@ -391,7 +397,20 @@ const sumBy = (list, keyFn, valFn) => {
 };
 
 /* ---------- Router ---------- */
-const ui = { period: '30d', finPeriod: '30d', orderStatus: 'all', orderChannel: 'all', orderQ: '', custQ: '', custTier: 'all', custDay: todayStr(), finType: 'all', mktPeriod: '30d', mktStage: 'all', prodPeriod: 'all', prodQ: '', prodMissing: false };
+const ui = { period: '30d', finPeriod: '30d', orderStatus: 'all', orderChannel: 'all', orderQ: '', custQ: '', custTier: 'all', custDay: todayStr(), finType: 'all', mktPeriod: '30d', mktStage: 'all', prodPeriod: 'all', prodQ: '', prodMissing: false,
+  // Khoảng ngày tự chọn (dùng chung mọi trang) & kỳ so sánh ở Tổng quan
+  customRange: { start: ymd(addDays(new Date(), -6)), end: todayStr() },
+  compareMode: 'prev', compareRange: { start: ymd(addDays(new Date(), -13)), end: ymd(addDays(new Date(), -7)) }, compareTouched: false };
+// Đổi ngày trong ô chọn khoảng ngày → cập nhật & vẽ lại (ngày bắt đầu luôn ≤ ngày kết thúc)
+document.addEventListener('change', e => {
+  const el = e.target;
+  if (!(el instanceof HTMLInputElement) || !el.dataset.range || !el.value) return;
+  const key = el.dataset.range, r = ui[key];
+  r[el.dataset.k] = el.value;
+  if (r.start > r.end) { if (el.dataset.k === 'start') r.end = r.start; else r.start = r.end; }
+  if (key === 'compareRange') ui.compareTouched = true;
+  rerender();
+});
 const VIEWS = {
   dashboard: { title: 'Tổng quan', render: renderDashboard },
   orders: { title: 'Đơn hàng & Tracking', render: renderOrders },
@@ -412,20 +431,34 @@ function route() {
 const rerender = route;
 
 /* ---------- View: Tổng quan ---------- */
-const periodSeg = (cur, action) => `<div class="seg">${PERIODS.map(([k, l]) => `<button class="${cur === k ? 'on' : ''}" data-action="${action}" data-p="${k}">${l}</button>`).join('')}</div>`;
+// Ô chọn khoảng ngày: ui[key] = { start, end } (key: customRange hoặc compareRange)
+const rangeInputs = key => `<span class="range-pick">
+  <input type="date" data-range="${key}" data-k="start" value="${ui[key].start}" max="${todayStr()}" aria-label="Từ ngày">
+  <span class="muted">→</span>
+  <input type="date" data-range="${key}" data-k="end" value="${ui[key].end}" max="${todayStr()}" aria-label="Đến ngày"></span>`;
+const periodSeg = (cur, action, list = PERIODS) => {
+  const r = cur === 'all' ? null : periodRange(cur);
+  return `<div class="seg">${list.map(([k, l]) => `<button class="${cur === k ? 'on' : ''}" data-action="${action}" data-p="${k}">${l}</button>`).join('')}</div>
+    ${cur === 'custom' ? rangeInputs('customRange') : r ? `<span class="muted">${r.start === r.end ? fmtDay(r.start) : fmtDay(r.start) + ' – ' + fmtDay(r.end)}</span>` : ''}`;
+};
+const rangeLabel = r => r.start === r.end ? fmtDay(r.start) : `${fmtDay(r.start)} – ${fmtDay(r.end)}`;
 const kpi = (label, value, sub = '') => `<div class="kpi"><span>${label}</span><b>${value}</b><small>${sub}</small></div>`;
 function costWarning(m) {
   if (!m.missingCostRevenue || !m.orderRevenue) return '';
   return `<br><a href="#products" class="delta down">⚠ ${pct(m.missingCostRevenue / m.orderRevenue)} doanh thu chưa có giá vốn</a>`;
 }
-function delta(cur, prev, lowerIsBetter = false) {
-  if (!prev) return '<span class="muted">Chưa có kỳ trước để so sánh</span>';
+function deltaText(cur, prev, lowerIsBetter = false, label = 'kỳ trước') {
+  if (!prev) return `<span class="muted">Chưa có số liệu ${label} để so sánh</span>`;
   const d = (cur - prev) / Math.abs(prev), good = lowerIsBetter ? d <= 0 : d >= 0;
-  return `<span class="delta ${good ? 'up' : 'down'}">${d >= 0 ? '▲' : '▼'} ${Math.abs(d * 100).toFixed(0)}%</span> so với kỳ trước`;
+  return `<span class="delta ${good ? 'up' : 'down'}">${d >= 0 ? '▲' : '▼'} ${Math.abs(d * 100).toFixed(0)}%</span> so với ${label}`;
 }
 
 function renderDashboard(el) {
-  const r = periodRange(ui.period), m = metrics(r), p = metrics(prevRange(r));
+  const r = periodRange(ui.period), m = metrics(r);
+  // Kỳ so sánh: liền trước (cùng số ngày) hoặc khoảng ngày tự chọn
+  const cr = ui.compareMode === 'custom' ? { ...ui.compareRange } : prevRange(r), p = metrics(cr);
+  const cmpLabel = ui.compareMode === 'custom' ? rangeLabel(cr) : 'kỳ trước';
+  const delta = (a, b, lower = false) => deltaText(a, b, lower, cmpLabel);
   const today = todayStr();
   const pending = FLOW.slice(0, 4).map(k => [k, state.orders.filter(o => o.status === k).length]);
   const dueTasks = state.tasks.filter(t => t.status !== 'done' && t.due && t.due <= today).sort((a, b) => a.due.localeCompare(b.due)).slice(0, 6);
@@ -433,17 +466,21 @@ function renderDashboard(el) {
   const byChannel = sumBy(m.valid, channelLabel, orderTotal);
 
   el.innerHTML = `
-    <div class="toolbar">${periodSeg(ui.period, 'setPeriod')}<span class="muted">${fmtDay(r.start)} – ${fmtDay(r.end)}</span></div>
+    <div class="toolbar">${periodSeg(ui.period, 'setPeriod')}</div>
+    <div class="toolbar compare-bar"><span class="muted">So sánh với</span>
+      <select id="cmp-mode"><option value="prev" ${ui.compareMode !== 'custom' ? 'selected' : ''}>Kỳ liền trước (${rangeLabel(prevRange(r))})</option>
+        <option value="custom" ${ui.compareMode === 'custom' ? 'selected' : ''}>Khoảng ngày tự chọn…</option></select>
+      ${ui.compareMode === 'custom' ? rangeInputs('compareRange') : ''}</div>
     <div class="kpis">
       ${kpi('Doanh thu', money(m.revenue), delta(m.revenue, p.revenue))}
       ${kpi('Chi phí', money(m.expense), delta(m.expense, p.expense, true))}
       ${kpi('Lợi nhuận', money(m.profit), 'Biên lợi nhuận ' + pct(m.revenue ? m.profit / m.revenue : 0) + costWarning(m))}
-      ${kpi('Đơn hàng', m.orders.length, 'Giá trị TB ' + money(m.aov))}
+      ${kpi('Đơn hàng', m.orders.length, delta(m.orders.length, p.orders.length) + '<br>Giá trị TB ' + money(m.aov))}
       ${kpi('Khách hàng mới', m.newCustomers, delta(m.newCustomers, p.newCustomers))}
       ${kpi('Tỷ lệ hủy / hoàn', pct(m.badRate), delta(m.badRate, p.badRate, true))}
     </div>
     <div class="grid-2">
-      <div class="card span-2"><div class="card-h"><h3>Doanh thu & chi phí theo ngày</h3><span class="muted small">${ui.period === 'today' ? '7 ngày gần nhất' : ''}</span></div>
+      <div class="card span-2"><div class="card-h"><h3>Doanh thu & chi phí theo ngày</h3><span class="muted small">${chartRange(r) !== r ? '7 ngày đến ' + fmtDay(r.end) : ''}</span></div>
         <div class="chart-box"><canvas id="ch-daily"></canvas></div></div>
       <div class="card"><h3>Trạng thái đơn trong kỳ</h3><div class="chart-box sm"><canvas id="ch-status"></canvas></div></div>
       <div class="card"><h3>Doanh thu theo kênh bán</h3>${hbars(byChannel)}</div>
@@ -454,7 +491,12 @@ function renderDashboard(el) {
         <ul class="list">${dueTasks.map(t => `<li class="clickable" data-action="editTask" data-id="${t.id}"><span>${esc(t.title)}</span><span class="meta ${t.due < today ? 'delta down' : ''}">${fmtDay(t.due)}</span></li>`).join('') || '<li class="empty">Không có việc đến hạn</li>'}</ul>
       </div>
     </div>`;
-  dailyChart($('#ch-daily'), dailySeries(ui.period === 'today' ? periodRange('7d') : r));
+  dailyChart($('#ch-daily'), dailySeries(chartRange(r)));
+  $('#cmp-mode').addEventListener('change', e => {
+    ui.compareMode = e.target.value;
+    if (ui.compareMode === 'custom' && !ui.compareTouched) { ui.compareRange = prevRange(r); }
+    rerender();
+  });
   statusChart($('#ch-status'), m.orders);
 }
 
@@ -869,7 +911,7 @@ function renderFinance(el) {
           <td><button class="btn ghost sm danger" data-action="deleteTx" data-id="${t.id}">Xóa</button></td></tr>`).join('') || '<tr><td colspan="6" class="empty">Chưa có giao dịch trong kỳ</td></tr>'}
       </tbody></table></div></div>`;
   $('#fin-type').addEventListener('change', e => { ui.finType = e.target.value; rerender(); });
-  dailyChart($('#ch-fin'), dailySeries(ui.finPeriod === 'today' ? periodRange('7d') : r));
+  dailyChart($('#ch-fin'), dailySeries(chartRange(r)));
 }
 function txModal(type, id) {
   const t = state.transactions.find(x => x.id === id) || { type, category: type === 'income' ? INCOME_CATS[0] : EXPENSE_CATS[0], amount: '', date: todayStr(), note: '' };
@@ -1017,7 +1059,7 @@ function customerModal(id) {
 }
 
 /* ---------- View: Sản phẩm & giá vốn ---------- */
-const PROD_PERIODS = [['30d', '30 ngày'], ['month', 'Tháng này'], ['all', 'Tất cả']];
+const PROD_PERIODS = [...PERIODS, ['all', 'Tất cả']];
 function productStats(r) {
   const map = new Map();
   state.orders.forEach(o => {
@@ -1052,7 +1094,7 @@ function prodRowCells(qty, rev, cost) {
 }
 function renderProducts(el) {
   el.innerHTML = `
-    <div class="toolbar"><div class="seg">${PROD_PERIODS.map(([k, l]) => `<button class="${ui.prodPeriod === k ? 'on' : ''}" data-action="setProdPeriod" data-p="${k}">${l}</button>`).join('')}</div>
+    <div class="toolbar">${periodSeg(ui.prodPeriod, 'setProdPeriod', PROD_PERIODS)}
       <span class="grow"></span>
       <button class="btn" data-action="copySkuList" title="Sao chép danh sách để dán vào Excel, điền giá vốn rồi dán ngược lại">Sao chép danh sách SKU</button>
       <button class="btn primary" data-action="pasteCosts">Dán giá vốn từ Excel</button></div>
@@ -1246,7 +1288,7 @@ function renderMarketing(el) {
   const camps = state.campaigns.filter(c => ui.mktStage === 'all' || c.stage === ui.mktStage).sort((a, b) => order.indexOf(a.stage) - order.indexOf(b.stage) || String(b.start).localeCompare(String(a.start)));
 
   el.innerHTML = `
-    <div class="toolbar">${periodSeg(ui.mktPeriod, 'setMktPeriod')}<span class="muted">${fmtDay(r.start)} – ${fmtDay(r.end)}</span><span class="grow"></span>
+    <div class="toolbar">${periodSeg(ui.mktPeriod, 'setMktPeriod')}<span class="grow"></span>
       <button class="btn primary" data-action="newCampaign">+ Chiến dịch mới</button></div>
     <div class="kpis">
       ${kpi('Chi phí marketing', money(spendAll), spendAll > spendAssigned ? `${money(spendAll - spendAssigned)} chưa gắn chiến dịch` : `${mktTx.length} khoản chi`)}

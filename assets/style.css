@@ -99,8 +99,13 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft
 input[type="search"] { min-width: 240px; flex: 1; }
 textarea { resize: vertical; min-height: 64px; }
 
-.seg { display: inline-flex; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 3px; }
-.seg button { font: inherit; border: 0; background: transparent; color: var(--muted); padding: 5px 12px; border-radius: 6px; cursor: pointer; }
+.seg { display: inline-flex; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 3px; max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+.seg::-webkit-scrollbar { display: none; }
+.seg button { font: inherit; border: 0; background: transparent; color: var(--muted); padding: 5px 12px; border-radius: 6px; cursor: pointer; white-space: nowrap; flex: none; }
+.range-pick { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.range-pick input { padding: 5px 8px; }
+.compare-bar { margin-top: -6px; font-size: 13px; }
+.compare-bar select { padding: 5px 8px; }
 .seg button.on { background: var(--ink); color: var(--bg); }
 
 /* ---------- Cards / KPIs ---------- */
@@ -289,6 +294,8 @@ a.btn { text-decoration: none; display: inline-block; }
   .main { padding: 16px 16px 40px; }
   h1 { font-size: 19px; }
   .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .seg { flex-wrap: wrap; overflow: visible; }
+  .seg button { padding: 5px 10px; }
   .kpi { padding: 12px; }
   .kpi b { font-size: 17px; }
   input[type="search"] { min-width: 0; width: 100%; }
