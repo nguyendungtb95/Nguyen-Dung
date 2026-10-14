@@ -180,6 +180,10 @@ async function importShopeeFile(file) {
   const knownBuyers = new Set(state.customers.map(c => c.shopeeUser).filter(Boolean));
   const fresh = parsed.filter(p => !existing.has(p.code)), update = parsed.filter(p => existing.has(p.code));
   const newBuyers = new Set(fresh.filter(p => !knownBuyers.has(p.customer.buyer || p.customer.name)).map(p => p.customer.buyer || p.customer.name));
+  // Tên gian hàng: nhập lại file cũ → giữ shop cũ; shop Shopee đầu tiên → "Shop chính"; các shop sau → "Shop phụ"
+  const shops = [...new Set(state.orders.filter(o => o.platform === 'Shopee' && o.shop).map(o => o.shop))];
+  const shopDefault = existing.get(update[0]?.code)?.shop || (state.orders.some(o => o.platform === 'Shopee') && !isDemoData() ? 'Shop phụ' : 'Shop chính');
+  const demo = isDemoData();
   const valid = parsed.filter(p => p.status !== 'cancelled' && p.status !== 'returned');
   const gross = valid.reduce((s, p) => s + p.items.reduce((a, i) => a + i.qty * i.price, 0) - p.discount, 0);
   const fees = parsed.reduce((s, p) => s + p.platformFee, 0);
@@ -188,6 +192,12 @@ async function importShopeeFile(file) {
 
   openModal('Nhập đơn từ Shopee', `
     <p class="muted">File <b>${esc(file.name)}</b> · đơn đặt từ ${fmtDay(days[0])} đến ${fmtDay(days[days.length - 1])}</p>
+    <div class="form" style="margin-bottom:14px">
+      <label>Tên gian hàng Shopee của file này<input id="imp-shop" list="imp-shops" value="${esc(shopDefault)}" placeholder="VD: Shop chính, Shop phụ…">
+        <datalist id="imp-shops">${[...new Set(['Shop chính', 'Shop phụ', ...shops])].map(s => `<option value="${esc(s)}">`).join('')}</datalist></label>
+      <label class="inline-check" style="align-self:end;padding-bottom:8px"><input type="checkbox" id="imp-clear" ${demo ? 'checked' : ''}>
+        Xóa toàn bộ dữ liệu hiện có trước khi nhập${demo ? ' (đang là dữ liệu mẫu)' : ''}</label>
+    </div>
     <div class="mini-kpis">
       <div><span>Tổng số đơn</span><b>${parsed.length}</b></div>
       <div><span>Đơn mới</span><b>${fresh.length}</b></div>
@@ -203,6 +213,13 @@ async function importShopeeFile(file) {
       Phí sàn = phí cố định + phí dịch vụ + phí xử lý giao dịch, được tính tự động vào chi phí. Nhập lại file mới hơn sẽ cập nhật trạng thái đơn đã có, không tạo trùng.</p>
     <div class="row-actions"><span style="flex:1"></span><button class="btn ghost" data-action="closeModal">Hủy</button><button class="btn primary" id="do-import">Nhập ${parsed.length} đơn</button></div>`, body => {
     $('#do-import', body).addEventListener('click', () => {
+      const shop = $('#imp-shop', body).value.trim();
+      if (!shop) { toast('Nhập tên gian hàng (VD: Shop chính)'); return; }
+      if ($('#imp-clear', body).checked) {
+        if (!demo && !confirm('Xóa TOÀN BỘ dữ liệu hiện có (đơn hàng, khách, thu chi, công việc…) rồi mới nhập file này?')) return;
+        state = normalize({});
+        existing.clear();
+      }
       const custByBuyer = new Map(state.customers.filter(c => c.shopeeUser).map(c => [c.shopeeUser, c]));
       parsed.slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt)).forEach(p => {
         const key = p.customer.buyer || p.customer.name;
@@ -215,14 +232,16 @@ async function importShopeeFile(file) {
         const data = {
           customerId: c.id, items: p.items, shippingFee: 0, discount: p.discount, platformFee: p.platformFee, channel: 'Shopee',
           carrier: p.carrier, shippingMethod: p.shippingMethod, trackingCode: p.tracking, payment: p.payment, status: p.status,
-          note: p.note, createdAt: p.createdAt, history: p.history, platform: 'Shopee', platformOrderId: p.code,
+          note: p.note, createdAt: p.createdAt, history: p.history, platform: 'Shopee', platformOrderId: p.code, shop,
         };
         const old = existing.get(p.code);
         if (old) Object.assign(old, data, { campaignId: old.campaignId || '', customerId: old.customerId });
         else state.orders.push({ id: p.code, campaignId: '', ...data });
       });
+      state.demo = false;
       save(); closeModal();
-      toast(`Đã nhập ${fresh.length} đơn mới, cập nhật ${update.length} đơn`);
+      const nNew = parsed.length - parsed.filter(p => existing.has(p.code)).length;
+      toast(`${shop}: đã nhập ${nNew} đơn mới, cập nhật ${parsed.length - nNew} đơn`);
       ui.orderStatus = 'all'; ui.orderChannel = 'Shopee'; ui.orderQ = '';
       if (location.hash !== '#orders') location.hash = '#orders'; else rerender();
     });

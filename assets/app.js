@@ -84,6 +84,10 @@ function nextId(prefix, list, width = 4) {
 }
 const orderTotal = o => o.items.reduce((s, i) => s + i.qty * i.price, 0) + (+o.shippingFee || 0) - (+o.discount || 0);
 const orderFee = o => o.status === 'cancelled' ? 0 : (+o.platformFee || 0);
+// Kênh kèm tên gian hàng (VD: "Shopee · Shop phụ") khi bán trên nhiều shop cùng sàn
+const channelLabel = o => o.shop ? `${o.channel} · ${o.shop}` : o.channel;
+// Dữ liệu mẫu: cờ demo, hoặc dữ liệu mẫu tạo từ bản cũ (trước khi có cờ)
+const isDemoData = () => state.demo || state.campaigns.some(c => c.id === 'CD001' && c.name === 'Flash sale 10.10');
 // Giá vốn: tra theo SKU, nếu không có SKU thì theo tên sản phẩm
 const itemKey = i => i.sku ? 'sku:' + String(i.sku).trim().toUpperCase() : 'name:' + String(i.name || '').normalize('NFC').trim().toLowerCase();
 const itemCost = i => i.cost != null ? +i.cost : (+(state.costs || {})[itemKey(i)] || 0);
@@ -119,6 +123,7 @@ function normalize(d) {
     orders: d.orders || [], customers: d.customers || [], tasks: d.tasks || [],
     transactions: d.transactions || [], careLogs: d.careLogs || [], campaigns: d.campaigns || [],
     costs: d.costs && typeof d.costs === 'object' ? d.costs : {},
+    demo: !!d.demo,
   };
 }
 function save() {
@@ -212,7 +217,7 @@ function seed() {
     careLogs.push({ id: 'CS' + pad(i, 4), customerId: c.id, date: ymd(addDays(now, -rnd(0, 20))), type: pick(CARE_TYPES), note: pick(['Khách hài lòng chất vải', 'Hỏi thêm size M', 'Gửi mã giảm 10%', 'Đã giải quyết đổi size', 'Hẹn ghé showroom']) });
   }
   const costs = Object.fromEntries(PRODUCTS.map(([n, p]) => [itemKey({ name: n }), Math.round(p * rnd(38, 48) / 100 / 1000) * 1000]));
-  const d = { orders, customers, tasks, transactions, careLogs, campaigns: [], costs };
+  const d = { orders, customers, tasks, transactions, careLogs, campaigns: [], costs, demo: true };
   seedMarketing(d);
   return d;
 }
@@ -420,7 +425,7 @@ function renderDashboard(el) {
   const pending = FLOW.slice(0, 4).map(k => [k, state.orders.filter(o => o.status === k).length]);
   const dueTasks = state.tasks.filter(t => t.status !== 'done' && t.due && t.due <= today).sort((a, b) => a.due.localeCompare(b.due)).slice(0, 6);
   const top = sumBy(m.valid.flatMap(o => o.items), i => i.name, i => i.qty * i.price).slice(0, 5);
-  const byChannel = sumBy(m.valid, o => o.channel, orderTotal);
+  const byChannel = sumBy(m.valid, channelLabel, orderTotal);
 
   el.innerHTML = `
     <div class="toolbar">${periodSeg(ui.period, 'setPeriod')}<span class="muted">${fmtDay(r.start)} – ${fmtDay(r.end)}</span></div>
@@ -460,7 +465,8 @@ function renderOrders(el) {
     </div>
     <div class="toolbar">
       <input id="order-q" type="search" placeholder="Tra cứu: mã đơn, tên, SĐT hoặc mã vận đơn…" value="${esc(ui.orderQ)}">
-      <select id="order-ch"><option value="all">Tất cả kênh</option>${CHANNELS.map(c => `<option ${ui.orderChannel === c ? 'selected' : ''}>${c}</option>`).join('')}</select>
+      <select id="order-ch"><option value="all">Tất cả kênh</option>${[...CHANNELS, ...new Set(state.orders.filter(o => o.shop).map(channelLabel))].sort((a, b) => a.localeCompare(b, 'vi'))
+        .map(c => `<option ${ui.orderChannel === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
       ${ui.orderStatus !== 'all' ? `<button class="btn ghost" data-action="filterStatus" data-s="all">Bỏ lọc: ${statusOf(ui.orderStatus).label} ×</button>` : ''}
       <label class="btn" title="Chọn file Excel xuất từ Kênh Người Bán Shopee → Quản Lý Đơn Hàng → Xuất">Nhập đơn Shopee (Excel)<input type="file" id="shopee-file" accept=".xlsx" hidden></label>
     </div>
@@ -477,14 +483,15 @@ function fillOrderRows() {
   const q = ui.orderQ.trim().toLowerCase();
   let list = state.orders.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   if (ui.orderStatus !== 'all') list = list.filter(o => o.status === ui.orderStatus);
-  if (ui.orderChannel !== 'all') list = list.filter(o => o.channel === ui.orderChannel);
+  // Chọn "Shopee" = mọi shop Shopee; chọn "Shopee · Shop phụ" = riêng shop đó
+  if (ui.orderChannel !== 'all') list = list.filter(o => o.channel === ui.orderChannel || channelLabel(o) === ui.orderChannel);
   if (q) list = list.filter(o => { const c = custById(o.customerId) || {}; return [o.id, c.name, c.phone, o.trackingCode].some(v => String(v || '').toLowerCase().includes(q)); });
   const shown = list.slice(0, 200);
   $('#order-rows').innerHTML = shown.map(o => {
     const c = custById(o.customerId) || { name: '(đã xóa)' }, nx = nextStatus(o);
     return `<tr data-action="viewOrder" data-id="${o.id}">
       <td><b>${o.id}</b></td><td>${esc(c.name)}<div class="muted small">${esc(c.phone || '')}</div></td>
-      <td>${fmtDT(o.createdAt)}</td><td>${esc(o.channel)}</td><td class="num">${money(orderTotal(o))}</td>
+      <td>${fmtDT(o.createdAt)}</td><td>${esc(o.channel)}${o.shop ? `<div class="muted small">${esc(o.shop)}</div>` : ''}</td><td class="num">${money(orderTotal(o))}</td>
       <td>${esc(o.carrier || '')}<div class="muted small">${esc(o.trackingCode || '—')}</div></td>
       <td>${badge(o.status)}</td>
       <td>${nx ? `<button class="btn sm" data-action="advanceOrder" data-id="${o.id}">→ ${statusOf(nx).label}</button>` : ''}</td></tr>`;
@@ -546,7 +553,7 @@ function viewOrder(id) {
     <div class="info-grid">
       <div><span>Khách hàng</span><a class="clickable" data-action="viewCustomer" data-id="${c.id || ''}">${esc(c.name)}</a> · ${esc(c.phone || '')}</div>
       <div><span>Địa chỉ</span>${esc(c.address || '—')}</div>
-      <div><span>Kênh bán · Chiến dịch</span>${esc(o.channel)} · ${campById(o.campaignId) ? `<a class="clickable" data-action="viewCampaign" data-id="${o.campaignId}">${esc(campById(o.campaignId).name)}</a>` : 'Tự nhiên'}</div>
+      <div><span>Kênh bán · Chiến dịch</span>${esc(channelLabel(o))} ·${campById(o.campaignId) ? `<a class="clickable" data-action="viewCampaign" data-id="${o.campaignId}">${esc(campById(o.campaignId).name)}</a>` : 'Tự nhiên'}</div>
       <div><span>Vận chuyển</span>${esc(o.carrier || '—')} · <b>${esc(o.trackingCode || 'chưa có mã')}</b></div>
       ${o.platform ? `<div><span>Mã đơn ${esc(o.platform)}</span><b>${esc(o.platformOrderId)}</b></div><div><span>Thanh toán · Hình thức giao</span>${esc(o.payment || '—')} · ${esc(o.shippingMethod || '—')}</div>` : ''}
       ${o.note ? `<div style="grid-column:1/-1"><span>Ghi chú</span>${esc(o.note)}</div>` : ''}
@@ -718,8 +725,10 @@ function renderFinance(el) {
   });
   expCats.sort((a, b) => b[1] - a[1]);
   // Lợi nhuận theo kênh bán: doanh thu − giá vốn − phí sàn − chi phí chiến dịch của kênh
-  const byCh = CHANNELS.map(ch => {
-    const os = m.orders.filter(o => o.channel === ch);
+  // Mỗi kênh một dòng; kênh bán trên nhiều shop (VD Shopee) tách thành từng shop
+  const chKeys = [...new Set([...CHANNELS, ...m.orders.map(channelLabel)])];
+  const byCh = chKeys.map(ch => {
+    const os = m.orders.filter(o => channelLabel(o) === ch);
     const rev = os.filter(isRevenue).reduce((s, o) => s + orderTotal(o), 0);
     const fee = os.reduce((s, o) => s + orderFee(o), 0);
     const cogs = os.reduce((s, o) => s + orderCogs(o), 0);
