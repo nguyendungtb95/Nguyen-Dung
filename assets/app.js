@@ -23,7 +23,8 @@ const TASK_COLS = [
 const PRIO = { high: 'Gấp', medium: 'Vừa', low: 'Thấp' };
 const CHANNELS = ['Website', 'Facebook', 'Instagram', 'Shopee', 'TikTok Shop', 'Tại cửa hàng'];
 const CARRIERS = ['GHN', 'GHTK', 'Viettel Post', 'J&T Express', 'Ninja Van', 'SPX Express', 'beDelivery', 'Xanh SM', 'Tự giao'];
-const EXPENSE_CATS = ['Nhập hàng', 'Quảng cáo', 'Phí sàn TMĐT', 'Vận chuyển', 'Mặt bằng', 'Lương nhân viên', 'Bao bì', 'Khác'];
+const AFFILIATE_CAT = 'Hoa hồng Affiliate / KOC';
+const EXPENSE_CATS = ['Nhập hàng', 'Quảng cáo', AFFILIATE_CAT, 'Phí sàn TMĐT', 'Vận chuyển', 'Mặt bằng', 'Lương nhân viên', 'Bao bì', 'Thuế', 'Khác'];
 const INCOME_CATS = ['Bán sỉ', 'Thanh lý', 'Thu khác'];
 const CARE_TYPES = ['Gọi điện', 'Nhắn tin', 'Tư vấn', 'Gửi ưu đãi', 'Xin feedback', 'Xử lý khiếu nại'];
 const SIZES = ['S', 'M', 'L', 'XL', 'Free'];
@@ -84,16 +85,31 @@ function nextId(prefix, list, width = 4) {
 }
 // adjust = phụ thu (VD tiền COD SPX cao hơn giá trong danh sách hàng) – cộng vào đơn, không phải sản phẩm
 const orderTotal = o => o.items.reduce((s, i) => s + i.qty * i.price, 0) + (+o.shippingFee || 0) + (+o.adjust || 0) - (+o.discount || 0);
-const orderFee = o => o.status === 'cancelled' ? 0 : (+o.platformFee || 0);
+/* Thuế (hộ kinh doanh): sales = % trên doanh thu (1% GTGT + 0,5% TNCN), feeVat = % thuế sàn tính trên phí sàn,
+   salesChannels = [] nghĩa là áp dụng mọi kênh. Thuế quảng cáo đặt theo từng tài khoản Ads (accTax). */
+const TAX_DEFAULT = { sales: 1.5, feeVat: 8, salesChannels: [] };
+const taxes = () => ({ ...TAX_DEFAULT, ...(state.taxes || {}) });
+const ADS_TAX_DEFAULT = { Facebook: 10, Instagram: 10, 'TikTok Shop': 8, Shopee: 8 };
+const accTaxPct = a => a && a.taxRate != null && a.taxRate !== '' ? +a.taxRate : (ADS_TAX_DEFAULT[a?.channel] || 0);
+const orderFeeBase = o => o.status === 'cancelled' ? 0 : (+o.platformFee || 0);
+const orderFeeTax = o => orderFeeBase(o) * taxes().feeVat / 100;
+const orderFee = o => orderFeeBase(o) + orderFeeTax(o);   // phí sàn gồm thuế
+const salesTaxApplies = o => { const ch = taxes().salesChannels; return !ch.length || ch.includes(o.channel); };
+const orderSalesTax = o => isRevenue(o) && salesTaxApplies(o) ? orderTotal(o) * taxes().sales / 100 : 0;
 // Phí vận chuyển shop tự trả cho hãng (VD: SPX – gồm phí hoàn hàng, phí COD, bảo hiểm); đơn hủy trước khi gửi không tốn phí
 const orderShip = o => o.status === 'cancelled' ? 0 : (+o.shipCost || 0);
 const SPX_PAYERS = ['Người gửi trả phí', 'Người nhận trả'];
 // Tài khoản quảng cáo: { id, name, channel, shop } – channel/shop trùng với kênh bán để tính ROAS theo kênh
 const accLabel = a => a.shop ? `${a.channel} · ${a.shop}` : a.channel;
-const adSpendDay = (day, accFilter) => Object.entries((state.adSpend || {})[day] || {}).reduce((s, [acc, v]) => s + (!accFilter || accFilter(acc) ? +v || 0 : 0), 0);
-function adSpendIn(r, accFilter) {
+// Chi phí Ads mặc định GỒM thuế quảng cáo của tài khoản (withTax = false → số chưa thuế như trên trình quản lý QC)
+const adSpendDay = (day, accFilter, withTax = true) => Object.entries((state.adSpend || {})[day] || {}).reduce((s, [acc, v]) => {
+  if (accFilter && !accFilter(acc)) return s;
+  const mul = withTax ? 1 + accTaxPct((state.adAccounts || []).find(a => a.id === acc)) / 100 : 1;
+  return s + (+v || 0) * mul;
+}, 0);
+function adSpendIn(r, accFilter, withTax = true) {
   let s = 0;
-  for (const day of Object.keys(state.adSpend || {})) if (inRange(day, r)) s += adSpendDay(day, accFilter);
+  for (const day of Object.keys(state.adSpend || {})) if (inRange(day, r)) s += adSpendDay(day, accFilter, withTax);
   return s;
 }
 // Chi phí QC của các tài khoản thuộc 1 kênh (VD "Shopee" gồm mọi shop, "Shopee · Shop chính" chỉ shop đó)
@@ -166,6 +182,8 @@ function normalize(d) {
     social: d.social && typeof d.social === 'object' ? d.social : null,
     // Phòng ban – vị trí – đầu việc định kỳ (workflow-org.js)
     org: d.org && typeof d.org === 'object' ? d.org : null,
+    // Cài đặt thuế (hộ kinh doanh) – xem TAX_DEFAULT
+    taxes: d.taxes && typeof d.taxes === 'object' ? d.taxes : null,
     demo: !!d.demo,
   };
 }
@@ -345,12 +363,16 @@ function metrics(r) {
   const missingCostRevenue = valid.reduce((s, o) => s + o.items.filter(i => !itemCost(i)).reduce((a, i) => a + i.qty * i.price, 0), 0);
   const opex = tx.filter(isOpex).reduce((s, t) => s + +t.amount, 0);
   const purchases = tx.filter(t => t.type === 'expense' && t.category === 'Nhập hàng').reduce((s, t) => s + +t.amount, 0);
-  const adSpend = adSpendIn(r);
-  const expense = opex + adSpend + platformFees + shipCosts + cogs;
+  const adSpend = adSpendIn(r), adTax = adSpend - adSpendIn(r, null, false);
+  const feeTax = orders.reduce((s, o) => s + orderFeeTax(o), 0);
+  const salesTax = valid.reduce((s, o) => s + orderSalesTax(o), 0);
+  const affiliate = tx.filter(t => t.type === 'expense' && t.category === AFFILIATE_CAT).reduce((s, t) => s + +t.amount, 0);
+  const expense = opex + adSpend + platformFees + shipCosts + cogs + salesTax;
   const revenue = orderRevenue + otherIncome;
   return {
     orders, valid, tx, orderRevenue, otherIncome, revenue, expense, platformFees, shipCosts, cogs, opex, adSpend, purchases, missingCostRevenue,
-    grossProfit: orderRevenue - cogs - platformFees - shipCosts, profit: revenue - expense,
+    adTax, feeTax, salesTax, affiliate, taxTotal: adTax + feeTax + salesTax,
+    grossProfit: orderRevenue - cogs - platformFees - shipCosts - salesTax, profit: revenue - expense,
     newCustomers: state.customers.filter(c => inRange(dayOf(c.createdAt), r)).length,
     badRate: orders.length ? orders.filter(o => !isRevenue(o)).length / orders.length : 0,
     aov: valid.length ? orderRevenue / valid.length : 0,
@@ -363,7 +385,7 @@ function dailySeries(r) {
   state.orders.forEach(o => {
     const k = dayOf(o.createdAt); if (!(k in rev)) return;
     if (isRevenue(o)) rev[k] += orderTotal(o);
-    exp[k] += orderFee(o) + orderShip(o) + orderCogs(o);
+    exp[k] += orderFee(o) + orderShip(o) + orderCogs(o) + orderSalesTax(o);
   });
   state.transactions.forEach(t => {
     if (!(t.date in rev)) return;
@@ -660,13 +682,15 @@ function viewOrder(id) {
       <tr><td colspan="4">Tạm tính · Phí ship · Giảm giá</td><td class="num">${money(sub)} + ${money(o.shippingFee)} − ${money(o.discount)}</td></tr>
       ${o.adjust ? `<tr><td colspan="4">Phụ thu <span class="muted small">(tiền COD cao hơn giá trong danh sách hàng SPX)</span></td><td class="num">+${money(o.adjust)}</td></tr>` : ''}
       <tr><td colspan="4"><b>Tổng cộng</b></td><td class="num"><b>${money(orderTotal(o))}</b></td></tr>
-      ${o.platformFee ? `<tr><td colspan="4">Phí sàn ${esc(o.platform || '')} (cố định + dịch vụ + thanh toán)</td><td class="num">−${money(o.platformFee)}</td></tr>
-      <tr><td colspan="4"><b>Thực nhận</b></td><td class="num"><b>${money(orderTotal(o) - o.platformFee)}</b></td></tr>` : ''}
+      ${orderFeeBase(o) ? `<tr><td colspan="4">Phí sàn ${esc(o.platform || '')} (cố định + dịch vụ + thanh toán)</td><td class="num">−${money(orderFeeBase(o))}</td></tr>
+      ${orderFeeTax(o) ? `<tr><td colspan="4">Thuế trên phí sàn (${taxes().feeVat}%)</td><td class="num">−${money(orderFeeTax(o))}</td></tr>` : ''}
+      <tr><td colspan="4"><b>Thực nhận từ sàn</b> <span class="muted small">(chưa trừ thuế bán hàng)</span></td><td class="num"><b>${money(orderTotal(o) - orderFee(o))}</b></td></tr>` : ''}
       ${orderShip(o) ? `<tr><td colspan="4">Phí vận chuyển shop trả${o.spx?.estimated ? ' <span class="muted small">(ước tính – cập nhật khi nhập báo cáo SPX)</span>' : ''}</td><td class="num">−${money(orderShip(o))}</td></tr>` : ''}
-      ${isRevenue(o) && (orderCogs(o) || orderShip(o)) ? (() => {
-        const net = orderTotal(o) - orderFee(o) - orderShip(o) - orderCogs(o);
+      ${orderSalesTax(o) ? `<tr><td colspan="4">Thuế bán hàng (${String(taxes().sales).replace('.', ',')}% doanh thu${o.platform ? ' – sàn khấu trừ thay' : ' – tự kê khai'})</td><td class="num">−${money(orderSalesTax(o))}</td></tr>` : ''}
+      ${isRevenue(o) && (orderCogs(o) || orderShip(o) || orderFee(o) || orderSalesTax(o)) ? (() => {
+        const net = orderTotal(o) - orderFee(o) - orderShip(o) - orderCogs(o) - orderSalesTax(o);
         return `${orderCogs(o) ? `<tr><td colspan="4">Giá vốn hàng${o.items.some(i => !itemCost(i)) ? ' <span class="delta down">(thiếu giá vốn một số SP)</span>' : ''}</td><td class="num">−${money(orderCogs(o))}</td></tr>` : ''}
-        <tr><td colspan="4"><b>Lãi của đơn</b> <span class="muted small">(sau ${[orderCogs(o) && 'giá vốn', o.platformFee && 'phí sàn', orderShip(o) && 'phí ship'].filter(Boolean).join(', ')})</span></td><td class="num"><b>${money(net)}</b> · ${pct(net / (orderTotal(o) || 1))}</td></tr>`;
+        <tr><td colspan="4"><b>Lãi của đơn</b> <span class="muted small">(sau ${[orderCogs(o) && 'giá vốn', orderFee(o) && 'phí sàn', orderShip(o) && 'phí ship', orderSalesTax(o) && 'thuế'].filter(Boolean).join(', ')}; chưa trừ quảng cáo)</span></td><td class="num"><b>${money(net)}</b> · ${pct(net / (orderTotal(o) || 1))}</td></tr>`;
       })() : ''}
     </tbody></table></div>
     <div class="detail-sec"><h4>Lịch sử tracking</h4>
@@ -891,7 +915,8 @@ function applyTemplate(i) {
 function renderFinance(el) {
   const r = periodRange(ui.finPeriod), m = metrics(r);
   const expCats = sumBy(m.tx.filter(isOpex), t => t.category, t => +t.amount);
-  [['Giá vốn hàng bán', m.cogs], ['Phí sàn TMĐT', m.platformFees], ['Vận chuyển', m.shipCosts], ['Quảng cáo', m.adSpend]].forEach(([k, v]) => {
+  [['Giá vốn hàng bán', m.cogs], ['Phí sàn TMĐT', m.platformFees - m.feeTax], ['Vận chuyển', m.shipCosts], ['Quảng cáo', m.adSpend - m.adTax],
+    ['Thuế', m.taxTotal]].forEach(([k, v]) => {
     if (!v) return;
     const row = expCats.find(c => c[0] === k);
     if (row) row[1] += v; else expCats.push([k, v]);
@@ -903,7 +928,7 @@ function renderFinance(el) {
   const byCh = chKeys.map(ch => {
     const os = m.orders.filter(o => channelLabel(o) === ch);
     const rev = os.filter(isRevenue).reduce((s, o) => s + orderTotal(o), 0);
-    const fee = os.reduce((s, o) => s + orderFee(o) + orderShip(o), 0);
+    const fee = os.reduce((s, o) => s + orderFee(o) + orderShip(o) + orderSalesTax(o), 0);
     const cogs = os.reduce((s, o) => s + orderCogs(o), 0);
     const ids = new Set(state.campaigns.filter(c => c.channel === ch).map(c => c.id));
     const mkt = m.tx.filter(t => t.type === 'expense' && ids.has(t.campaignId)).reduce((s, t) => s + +t.amount, 0) + adSpendFor(r, ch, true);
@@ -914,22 +939,28 @@ function renderFinance(el) {
   if (ui.finType !== 'all') tx = tx.filter(t => t.type === ui.finType);
   el.innerHTML = `
     <div class="toolbar">${periodSeg(ui.finPeriod, 'setFinPeriod')}<span class="grow"></span>
+      <button class="btn ghost" data-action="taxSettings">Cài đặt thuế</button>
       <button class="btn" data-action="newTx" data-type="income">+ Ghi khoản thu</button>
       <button class="btn primary" data-action="newTx" data-type="expense">+ Ghi chi phí</button></div>
     <div class="kpis">
       ${kpi('Doanh thu', money(m.revenue), `${m.valid.length} đơn hợp lệ${m.otherIncome ? ' · thu khác ' + money(m.otherIncome) : ''}`)}
-      ${kpi('Lãi gộp', money(m.grossProfit), `Sau giá vốn, phí sàn & ship · biên ${pct(m.orderRevenue ? m.grossProfit / m.orderRevenue : 0)}`)}
-      ${kpi('Chi phí vận hành', money(m.opex + m.adSpend), m.adSpend ? `gồm ${money(m.adSpend)} quảng cáo Ads` : 'Quảng cáo, mặt bằng, lương…')}
+      ${kpi('Lãi gộp', money(m.grossProfit), `Sau giá vốn, phí sàn, ship & thuế bán hàng · biên ${pct(m.orderRevenue ? m.grossProfit / m.orderRevenue : 0)}`)}
+      ${kpi('Chi phí vận hành', money(m.opex + m.adSpend), m.adSpend ? `gồm ${money(m.adSpend)} quảng cáo Ads (đã có thuế)` : 'Quảng cáo, mặt bằng, lương…')}
+      ${kpi('Tổng thuế', money(m.taxTotal), `Bán hàng ${shortMoney(m.salesTax)} · phí sàn ${shortMoney(m.feeTax)} · QC ${shortMoney(m.adTax)}`)}
       ${kpi('Lãi ròng', money(m.profit), 'Biên ' + pct(m.revenue ? m.profit / m.revenue : 0) + costWarning(m))}
     </div>
     <div class="grid-2">
       <div class="card span-2"><h3>Doanh thu & chi phí theo ngày</h3><div class="chart-box"><canvas id="ch-fin"></canvas></div></div>
       <div class="card"><h3>Báo cáo lãi lỗ</h3><ul class="list">
         ${step('Doanh thu bán hàng', m.orderRevenue)}${m.otherIncome ? step('Thu khác', m.otherIncome, '+') : ''}
-        ${step('Giá vốn hàng bán', m.cogs, '−')}${m.platformFees ? step('Phí sàn TMĐT', m.platformFees, '−') : ''}${m.shipCosts ? step('Phí vận chuyển shop trả', m.shipCosts, '−') : ''}
+        ${step('Giá vốn hàng bán', m.cogs, '−')}
+        ${m.platformFees ? step('Phí sàn TMĐT', m.platformFees - m.feeTax, '−') : ''}${m.feeTax ? step(`Thuế trên phí sàn (${taxes().feeVat}%)`, m.feeTax, '−') : ''}
+        ${m.shipCosts ? step('Phí vận chuyển shop trả', m.shipCosts, '−') : ''}
+        ${m.salesTax ? step(`Thuế bán hàng (${String(taxes().sales).replace('.', ',')}% doanh thu)`, m.salesTax, '−') : ''}
         ${step('Lãi gộp', m.grossProfit + m.otherIncome, '', true)}
-        ${m.adSpend ? step('Quảng cáo Ads (Shopee, TikTok, Facebook…)', m.adSpend, '−') : ''}
-        ${step('Chi phí vận hành khác', m.opex, '−')}
+        ${m.adSpend ? step('Quảng cáo Ads (Shopee, TikTok, Facebook…)', m.adSpend - m.adTax, '−') : ''}${m.adTax ? step('Thuế quảng cáo', m.adTax, '−') : ''}
+        ${m.affiliate ? step('Hoa hồng Affiliate / KOC', m.affiliate, '−') : ''}
+        ${step('Chi phí vận hành khác', m.opex - m.affiliate, '−')}
         ${step('Lãi ròng', m.profit, '', true)}
       </ul>
       <p class="muted small">${costMode()
@@ -942,7 +973,7 @@ function renderFinance(el) {
           <li><span>Lãi ròng TB mỗi ngày</span><b>${money(m.profit / (daysBetween(r.start, r.end) + 1))}</b></li>
         </ul></div>
       <div class="card span-2 flush"><div class="card-h" style="padding:14px 16px 0"><h3>Lợi nhuận theo kênh bán</h3><span class="muted small">Chưa trừ chi phí chung (mặt bằng, lương…)</span></div>
-        <div class="table-wrap"><table class="tbl static"><thead><tr><th>Kênh</th><th class="num">Đơn</th><th class="num">Doanh thu</th><th class="num">Giá vốn</th><th class="num">Phí sàn + ship</th><th class="num">Chi marketing</th><th class="num">Còn lại</th><th class="num">% còn lại</th></tr></thead><tbody>
+        <div class="table-wrap"><table class="tbl static"><thead><tr><th>Kênh</th><th class="num">Đơn</th><th class="num">Doanh thu</th><th class="num">Giá vốn</th><th class="num">Phí sàn, ship & thuế</th><th class="num">Chi marketing</th><th class="num">Còn lại</th><th class="num">% còn lại</th></tr></thead><tbody>
           ${byCh.map(x => `<tr><td><b>${esc(x.ch)}</b></td><td class="num">${x.n}</td><td class="num">${money(x.rev)}</td><td class="num">${x.cogs ? '−' + money(x.cogs) : '—'}</td><td class="num">${x.fee ? '−' + money(x.fee) : '—'}</td><td class="num">${x.mkt ? '−' + money(x.mkt) : '—'}</td><td class="num"><b>${money(x.net)}</b></td><td class="num">${x.rev ? pct(x.net / x.rev) : '—'}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">Chưa có dữ liệu</td></tr>'}
         </tbody></table></div></div>
     </div>
@@ -956,6 +987,33 @@ function renderFinance(el) {
       </tbody></table></div></div>`;
   $('#fin-type').addEventListener('change', e => { ui.finType = e.target.value; rerender(); });
   dailyChart($('#ch-fin'), dailySeries(chartRange(r)));
+}
+function taxModal() {
+  if (typeof ensureAdAccounts === 'function') ensureAdAccounts();
+  const t = taxes(), all = !t.salesChannels.length;
+  openModal('Cài đặt thuế (hộ kinh doanh)', `
+    <form class="form" id="f-tax">
+      <div class="section-t">Thuế trên doanh thu bán hàng</div>
+      <label>Tỷ lệ (% doanh thu)<input name="sales" type="number" min="0" max="100" step="0.1" value="${t.sales}"></label>
+      <p class="muted small" style="align-self:end">Hàng hóa: 1% GTGT + 0,5% TNCN = 1,5%. Sàn TMĐT khấu trừ thay; đơn tự bán (Facebook, SPX…) tự kê khai.</p>
+      <div class="full"><span class="muted small">Áp dụng cho kênh:</span>
+        <div class="tax-ch">${CHANNELS.map(c => `<label class="inline-check"><input type="checkbox" name="ch" value="${esc(c)}" ${all || t.salesChannels.includes(c) ? 'checked' : ''}> ${esc(c)}</label>`).join('')}</div></div>
+      <div class="section-t">Thuế trên phí sàn (Shopee, TikTok Shop…)</div>
+      <label>Tỷ lệ (% trên phí cố định + dịch vụ + thanh toán)<input name="feeVat" type="number" min="0" max="100" step="0.1" value="${t.feeVat}"></label>
+      <p class="muted small" style="align-self:end">Nếu số phí trong file của sàn đã gồm thuế thì đặt 0 để không tính hai lần.</p>
+      <div class="section-t">Thuế cộng thêm trên chi phí quảng cáo</div>
+      ${(state.adAccounts || []).map(a => `<label>${esc(a.name)} (%)<input name="ad_${a.id}" type="number" min="0" max="100" step="0.1" value="${accTaxPct(a)}"></label>`).join('') || '<p class="muted small full">Chưa có tài khoản quảng cáo – mở trang Chi phí quảng cáo để tạo.</p>'}
+      <p class="muted small full">Số nhập ở trang Chi phí quảng cáo là số <b>chưa thuế</b> (như trên trình quản lý quảng cáo); app tự cộng thuế khi tính chi phí và lãi.</p>
+      <div class="form-actions"><button type="button" class="btn ghost" data-action="closeModal">Hủy</button><button class="btn primary">Lưu</button></div>
+    </form>`, body => {
+    $('#f-tax', body).addEventListener('submit', e => {
+      e.preventDefault();
+      const fd = new FormData(e.target), chs = fd.getAll('ch');
+      state.taxes = { sales: Math.max(0, +fd.get('sales') || 0), feeVat: Math.max(0, +fd.get('feeVat') || 0), salesChannels: chs.length === CHANNELS.length ? [] : chs };
+      (state.adAccounts || []).forEach(a => { const v = fd.get('ad_' + a.id); if (v != null) a.taxRate = Math.max(0, +v || 0); });
+      save(); closeModal(); toast('Đã lưu cài đặt thuế'); rerender();
+    });
+  });
 }
 function txModal(type, id) {
   const t = state.transactions.find(x => x.id === id) || { type, category: type === 'income' ? INCOME_CATS[0] : EXPENSE_CATS[0], amount: '', date: todayStr(), note: '' };
@@ -1589,6 +1647,7 @@ const ACTIONS = {
   deleteTask: d => { if (!confirm('Xóa công việc này?')) return; state.tasks = state.tasks.filter(t => t.id !== d.id); save(); closeModal(); rerender(); },
   applyTemplate: d => applyTemplate(+d.i),
   newTx: d => txModal(d.type),
+  taxSettings: () => taxModal(),
   editTx: d => { const t = state.transactions.find(x => x.id === d.id); if (t) txModal(t.type, t.id); },
   deleteTx: d => { if (!confirm('Xóa giao dịch này?')) return; state.transactions = state.transactions.filter(t => t.id !== d.id); save(); rerender(); },
   newCustomer: () => customerModal(),

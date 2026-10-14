@@ -130,7 +130,7 @@ function adsData(r) {
 function adsSummaryHtml(d, r) {
   const m = metrics(r);
   return `
-    ${kpi('Tổng chi phí Ads', money(d.total), `${d.days.length} ngày · TB ${money(d.total / (d.days.length || 1))}/ngày`)}
+    ${kpi('Tổng chi phí Ads (gồm thuế)', money(d.total), `Thuế QC ${money(d.total - adSpendIn(r, null, false))} · TB ${money(d.total / (d.days.length || 1))}/ngày`)}
     ${kpi('Doanh thu kênh có chạy Ads', money(d.revenue), `${d.adOrders.length} đơn`)}
     ${kpi('ROAS', fmtRoas(d.total ? d.revenue / d.total : null), 'Doanh thu / chi phí Ads')}
     ${kpi('Chi phí Ads / đơn', d.adOrders.length && d.total ? money(d.total / d.adOrders.length) : '—', `Ads / doanh thu: ${d.revenue ? pct(d.total / d.revenue) : '—'}`)}
@@ -147,7 +147,7 @@ function adsAccTableHtml(d) {
   }).join('');
 }
 function adsRowCells(day, d) {
-  const tot = d.accs.reduce((s, a) => s + getAd(day, a.id), 0), rev = d.revDay[day] || 0;
+  const tot = d.accs.reduce((s, a) => s + getAd(day, a.id) * (1 + accTaxPct(a) / 100), 0), rev = d.revDay[day] || 0;
   return { tot: tot ? money(tot) : '—', rev: rev ? money(rev) : '—', roas: tot ? fmtRoas(rev / tot) : '—', cls: tot && rev / tot < 2 ? 'delta down' : '' };
 }
 
@@ -163,12 +163,12 @@ function renderAds(el) {
       <div class="card span-2"><div class="card-h"><h3>Chi phí Ads theo ngày</h3><span class="muted small">Cột: chi phí từng tài khoản · Đường: doanh thu các kênh có chạy Ads</span></div>
         <div class="chart-box"><canvas id="ch-ads"></canvas></div></div>
       <div class="card span-2 flush"><div class="card-h" style="padding:14px 16px 0"><h3>Hiệu quả theo tài khoản quảng cáo</h3></div>
-        <div class="table-wrap"><table class="tbl static"><thead><tr><th>Tài khoản → kênh bán</th><th class="num">Chi phí</th><th class="num">Doanh thu kênh</th><th class="num">Đơn</th><th class="num">ROAS</th><th class="num">Chi phí / đơn</th><th class="num">Ads / DT</th><th>Đánh giá</th><th></th></tr></thead>
+        <div class="table-wrap"><table class="tbl static"><thead><tr><th>Tài khoản → kênh bán</th><th class="num">Chi phí (gồm thuế)</th><th class="num">Doanh thu kênh</th><th class="num">Đơn</th><th class="num">ROAS</th><th class="num">Chi phí / đơn</th><th class="num">Ads / DT</th><th>Đánh giá</th><th></th></tr></thead>
         <tbody id="ads-acc">${adsAccTableHtml(d)}</tbody></table></div></div>
     </div>
     <div class="card flush">
       <div class="card-h" style="padding:14px 16px 0"><h3>Nhập chi phí theo ngày</h3><span class="muted small">Gõ số tiền rồi nhấn Enter để xuống ngày tiếp theo – tự lưu</span></div>
-      <div class="table-wrap"><table class="tbl static ads-grid"><thead><tr><th>Ngày</th>${d.accs.map((a, i) => `<th class="num"><span class="dot-c" style="--c:${adColor(a, i)}"></span>${esc(a.name)}</th>`).join('')}<th class="num">Tổng Ads</th><th class="num">Doanh thu</th><th class="num">ROAS</th></tr></thead>
+      <div class="table-wrap"><table class="tbl static ads-grid"><thead><tr><th>Ngày</th>${d.accs.map((a, i) => `<th class="num"><span class="dot-c" style="--c:${adColor(a, i)}"></span>${esc(a.name)}</th>`).join('')}<th class="num">Tổng (gồm thuế)</th><th class="num">Doanh thu</th><th class="num">ROAS</th></tr></thead>
       <tbody id="ads-rows">${d.days.map(day => {
         const c = adsRowCells(day, d), wd = parseDay(day).toLocaleDateString('vi-VN', { weekday: 'short' });
         return `<tr data-day="${day}" class="${day === today ? 'is-today' : ''}"><td><b>${fmtDay(day).slice(0, 5)}</b> <span class="muted small">${wd}</span></td>
@@ -243,6 +243,7 @@ function adAccountModal(id) {
     <form class="form" id="f-adacc">
       <label class="full">Tên tài khoản<input name="name" required value="${esc(a.name)}" placeholder="VD: Facebook Ads, Shopee Ads · Shop phụ, TikTok Ads 2…"></label>
       <label>Quảng cáo cho kênh bán<select name="channel">${opts(CHANNELS, a.channel)}</select></label>
+      <label>Thuế cộng thêm trên chi phí (%)<input name="taxRate" type="number" min="0" max="100" step="0.1" value="${accTaxPct(a)}"></label>
       <label>Gian hàng (nếu kênh có nhiều shop)<input name="shop" list="adacc-shops" value="${esc(a.shop)}" placeholder="Để trống = cả kênh">
         <datalist id="adacc-shops">${shops.map(s => `<option value="${esc(s)}">`).join('')}</datalist></label>
       <p class="muted small full">Kênh bán dùng để tính ROAS: doanh thu các đơn của kênh (và shop) đó ÷ chi phí của tài khoản.</p>
@@ -252,7 +253,7 @@ function adAccountModal(id) {
     $('#f-adacc', body).addEventListener('submit', e => {
       e.preventDefault();
       const f = Object.fromEntries(new FormData(e.target));
-      const data = { name: f.name.trim(), channel: f.channel, shop: f.shop.trim() };
+      const data = { name: f.name.trim(), channel: f.channel, shop: f.shop.trim(), taxRate: Math.max(0, +f.taxRate || 0) };
       if (id) Object.assign(a, data);
       else state.adAccounts.push({ id: 'ad' + Date.now().toString(36), ...data });
       save(); closeModal(); rerender();

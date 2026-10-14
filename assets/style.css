@@ -366,3 +366,5 @@ a.btn { text-decoration: none; display: inline-block; }
 .wf-pos { padding: 12px 0; border-top: 1px solid var(--line); }
 .wf-pos p { margin: 6px 0; }
 @media (max-width: 760px) { .wf-groups, .wf-org { grid-template-columns: minmax(0, 1fr); } }
+
+.tax-ch { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 6px; }
