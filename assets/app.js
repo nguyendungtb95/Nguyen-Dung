@@ -164,6 +164,8 @@ function normalize(d) {
     costs: d.costs && typeof d.costs === 'object' ? d.costs : {},
     // Truyền thông Social (social.js): traffic kênh, bài đăng, chỉ tiêu
     social: d.social && typeof d.social === 'object' ? d.social : null,
+    // Phòng ban – vị trí – đầu việc định kỳ (workflow-org.js)
+    org: d.org && typeof d.org === 'object' ? d.org : null,
     demo: !!d.demo,
   };
 }
@@ -526,6 +528,7 @@ function renderDashboard(el) {
       <div class="card"><h3>Sản phẩm bán chạy</h3>${hbars(top)}</div>
       <div class="card"><h3>Cần xử lý ngay</h3>
         <ul class="list">${pending.map(([k, n]) => `<li><span>${badge(k)}</span><a class="clickable" href="#orders" data-action="filterStatus" data-s="${k}">${n} đơn</a></li>`).join('')}</ul>
+        ${typeof orgTodaySummary === 'function' ? orgTodaySummary() : ''}
         <h3 style="margin:16px 0 6px">Việc đến hạn / quá hạn</h3>
         <ul class="list">${dueTasks.map(t => `<li class="clickable" data-action="editTask" data-id="${t.id}"><span>${esc(t.title)}</span><span class="meta ${t.due < today ? 'delta down' : ''}">${fmtDay(t.due)}</span></li>`).join('') || '<li class="empty">Không có việc đến hạn</li>'}</ul>
       </div>

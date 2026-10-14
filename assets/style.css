@@ -346,3 +346,23 @@ a.btn { text-decoration: none; display: inline-block; }
   .modal { padding: 0; }
   .modal-card { border-radius: 0; min-height: 100%; }
 }
+
+/* ---------- Workflow: phòng ban – vị trí – đầu việc ---------- */
+.wf-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
+.wf-group, .wf-dept { border-top: 3px solid var(--c); }
+.wf-group .card-h { margin-bottom: 8px; }
+.wf-pct { font-size: 18px; font-variant-numeric: tabular-nums; }
+.wf-check { list-style: none; margin: 10px 0 0; padding: 0; }
+.wf-check li { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+.wf-check li:last-child { border-bottom: 0; }
+.wf-check label { display: flex; align-items: flex-start; gap: 8px; flex: 1; cursor: pointer; min-width: 0; }
+.wf-check input { width: 17px; height: 17px; margin-top: 2px; accent-color: var(--c); flex: none; }
+.wf-time { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--muted); min-width: 40px; padding-top: 2px; }
+.wf-t { line-height: 1.4; }
+.wf-check li.ok .wf-t { color: var(--muted); text-decoration: line-through; }
+.wf-check li.late .wf-time { color: var(--bad); font-weight: 600; }
+.wf-check .btn { flex: none; }
+.wf-org { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+.wf-pos { padding: 12px 0; border-top: 1px solid var(--line); }
+.wf-pos p { margin: 6px 0; }
+@media (max-width: 760px) { .wf-groups, .wf-org { grid-template-columns: minmax(0, 1fr); } }
