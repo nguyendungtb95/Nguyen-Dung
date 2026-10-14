@@ -84,6 +84,13 @@ function nextId(prefix, list, width = 4) {
 }
 const orderTotal = o => o.items.reduce((s, i) => s + i.qty * i.price, 0) + (+o.shippingFee || 0) - (+o.discount || 0);
 const orderFee = o => o.status === 'cancelled' ? 0 : (+o.platformFee || 0);
+// Giá vốn: tra theo SKU, nếu không có SKU thì theo tên sản phẩm
+const itemKey = i => i.sku ? 'sku:' + String(i.sku).trim().toUpperCase() : 'name:' + String(i.name || '').normalize('NFC').trim().toLowerCase();
+const itemCost = i => i.cost != null ? +i.cost : (+(state.costs || {})[itemKey(i)] || 0);
+const orderCogs = o => isRevenue(o) ? o.items.reduce((s, i) => s + i.qty * itemCost(i), 0) : 0;
+// Đã nhập giá vốn → tính lãi theo giá vốn hàng bán, tiền "Nhập hàng" chỉ là dòng tiền mua hàng dự trữ
+const costMode = () => Object.values(state.costs || {}).some(v => +v > 0);
+const isOpex = t => t.type === 'expense' && !(costMode() && t.category === 'Nhập hàng');
 const statusOf = k => STATUSES.find(s => s.key === k) || STATUSES[0];
 const badge = k => { const s = statusOf(k); return `<span class="badge" style="--c:${s.color}">${s.label}</span>`; };
 const custById = id => state.customers.find(c => c.id === id);
@@ -111,6 +118,7 @@ function normalize(d) {
   return {
     orders: d.orders || [], customers: d.customers || [], tasks: d.tasks || [],
     transactions: d.transactions || [], careLogs: d.careLogs || [], campaigns: d.campaigns || [],
+    costs: d.costs && typeof d.costs === 'object' ? d.costs : {},
   };
 }
 function save() {
@@ -203,7 +211,8 @@ function seed() {
     const c = pick(customers);
     careLogs.push({ id: 'CS' + pad(i, 4), customerId: c.id, date: ymd(addDays(now, -rnd(0, 20))), type: pick(CARE_TYPES), note: pick(['Khách hài lòng chất vải', 'Hỏi thêm size M', 'Gửi mã giảm 10%', 'Đã giải quyết đổi size', 'Hẹn ghé showroom']) });
   }
-  const d = { orders, customers, tasks, transactions, careLogs, campaigns: [] };
+  const costs = Object.fromEntries(PRODUCTS.map(([n, p]) => [itemKey({ name: n }), Math.round(p * rnd(38, 48) / 100 / 1000) * 1000]));
+  const d = { orders, customers, tasks, transactions, careLogs, campaigns: [], costs };
   seedMarketing(d);
   return d;
 }
@@ -277,10 +286,15 @@ function metrics(r) {
   const tx = state.transactions.filter(t => inRange(t.date, r));
   const otherIncome = tx.filter(t => t.type === 'income').reduce((s, t) => s + +t.amount, 0);
   const platformFees = orders.reduce((s, o) => s + orderFee(o), 0);
-  const expense = tx.filter(t => t.type === 'expense').reduce((s, t) => s + +t.amount, 0) + platformFees;
+  const cogs = valid.reduce((s, o) => s + orderCogs(o), 0);
+  const missingCostRevenue = valid.reduce((s, o) => s + o.items.filter(i => !itemCost(i)).reduce((a, i) => a + i.qty * i.price, 0), 0);
+  const opex = tx.filter(isOpex).reduce((s, t) => s + +t.amount, 0);
+  const purchases = tx.filter(t => t.type === 'expense' && t.category === 'Nhập hàng').reduce((s, t) => s + +t.amount, 0);
+  const expense = opex + platformFees + cogs;
   const revenue = orderRevenue + otherIncome;
   return {
-    orders, valid, tx, orderRevenue, otherIncome, revenue, expense, platformFees, profit: revenue - expense,
+    orders, valid, tx, orderRevenue, otherIncome, revenue, expense, platformFees, cogs, opex, purchases, missingCostRevenue,
+    grossProfit: orderRevenue - cogs - platformFees, profit: revenue - expense,
     newCustomers: state.customers.filter(c => inRange(dayOf(c.createdAt), r)).length,
     badRate: orders.length ? orders.filter(o => !isRevenue(o)).length / orders.length : 0,
     aov: valid.length ? orderRevenue / valid.length : 0,
@@ -293,9 +307,12 @@ function dailySeries(r) {
   state.orders.forEach(o => {
     const k = dayOf(o.createdAt); if (!(k in rev)) return;
     if (isRevenue(o)) rev[k] += orderTotal(o);
-    exp[k] += orderFee(o);
+    exp[k] += orderFee(o) + orderCogs(o);
   });
-  state.transactions.forEach(t => { if (t.date in rev) (t.type === 'income' ? rev : exp)[t.date] += +t.amount; });
+  state.transactions.forEach(t => {
+    if (!(t.date in rev)) return;
+    if (t.type === 'income') rev[t.date] += +t.amount; else if (isOpex(t)) exp[t.date] += +t.amount;
+  });
   return { days, rev: days.map(x => rev[x]), exp: days.map(x => exp[x]) };
 }
 function customerStats() {
@@ -364,10 +381,11 @@ const sumBy = (list, keyFn, valFn) => {
 };
 
 /* ---------- Router ---------- */
-const ui = { period: '30d', finPeriod: '30d', orderStatus: 'all', orderChannel: 'all', orderQ: '', custQ: '', custTier: 'all', custDay: todayStr(), finType: 'all', mktPeriod: '30d', mktStage: 'all' };
+const ui = { period: '30d', finPeriod: '30d', orderStatus: 'all', orderChannel: 'all', orderQ: '', custQ: '', custTier: 'all', custDay: todayStr(), finType: 'all', mktPeriod: '30d', mktStage: 'all', prodPeriod: 'all', prodQ: '', prodMissing: false };
 const VIEWS = {
   dashboard: { title: 'Tổng quan', render: renderDashboard },
   orders: { title: 'Đơn hàng & Tracking', render: renderOrders },
+  products: { title: 'Sản phẩm & giá vốn', render: renderProducts },
   workflow: { title: 'Workflow công việc', render: renderWorkflow },
   marketing: { title: 'Marketing & hiệu quả kênh', render: renderMarketing },
   finance: { title: 'Thu – Chi', render: renderFinance },
@@ -386,6 +404,10 @@ const rerender = route;
 /* ---------- View: Tổng quan ---------- */
 const periodSeg = (cur, action) => `<div class="seg">${PERIODS.map(([k, l]) => `<button class="${cur === k ? 'on' : ''}" data-action="${action}" data-p="${k}">${l}</button>`).join('')}</div>`;
 const kpi = (label, value, sub = '') => `<div class="kpi"><span>${label}</span><b>${value}</b><small>${sub}</small></div>`;
+function costWarning(m) {
+  if (!m.missingCostRevenue || !m.orderRevenue) return '';
+  return `<br><a href="#products" class="delta down">⚠ ${pct(m.missingCostRevenue / m.orderRevenue)} doanh thu chưa có giá vốn</a>`;
+}
 function delta(cur, prev, lowerIsBetter = false) {
   if (!prev) return '<span class="muted">Chưa có kỳ trước để so sánh</span>';
   const d = (cur - prev) / Math.abs(prev), good = lowerIsBetter ? d <= 0 : d >= 0;
@@ -405,7 +427,7 @@ function renderDashboard(el) {
     <div class="kpis">
       ${kpi('Doanh thu', money(m.revenue), delta(m.revenue, p.revenue))}
       ${kpi('Chi phí', money(m.expense), delta(m.expense, p.expense, true))}
-      ${kpi('Lợi nhuận', money(m.profit), 'Biên lợi nhuận ' + pct(m.revenue ? m.profit / m.revenue : 0))}
+      ${kpi('Lợi nhuận', money(m.profit), 'Biên lợi nhuận ' + pct(m.revenue ? m.profit / m.revenue : 0) + costWarning(m))}
       ${kpi('Đơn hàng', m.orders.length, 'Giá trị TB ' + money(m.aov))}
       ${kpi('Khách hàng mới', m.newCustomers, delta(m.newCustomers, p.newCustomers))}
       ${kpi('Tỷ lệ hủy / hoàn', pct(m.badRate), delta(m.badRate, p.badRate, true))}
@@ -530,11 +552,13 @@ function viewOrder(id) {
       ${o.note ? `<div style="grid-column:1/-1"><span>Ghi chú</span>${esc(o.note)}</div>` : ''}
     </div>
     <div class="table-wrap"><table class="tbl"><thead><tr><th>Sản phẩm</th><th>Size</th><th class="num">SL</th><th class="num">Đơn giá</th><th class="num">Thành tiền</th></tr></thead><tbody>
-      ${o.items.map(i => `<tr><td>${esc(i.name)}</td><td>${esc(i.size)}</td><td class="num">${i.qty}</td><td class="num">${money(i.price)}</td><td class="num">${money(i.qty * i.price)}</td></tr>`).join('')}
+      ${o.items.map(i => `<tr><td>${esc(i.name)}${i.sku ? ` <span class="chip">${esc(i.sku)}</span>` : ''}</td><td>${esc(i.size)}</td><td class="num">${i.qty}</td><td class="num">${money(i.price)}</td><td class="num">${money(i.qty * i.price)}</td></tr>`).join('')}
       <tr><td colspan="4">Tạm tính · Phí ship · Giảm giá</td><td class="num">${money(sub)} + ${money(o.shippingFee)} − ${money(o.discount)}</td></tr>
       <tr><td colspan="4"><b>Tổng cộng</b></td><td class="num"><b>${money(orderTotal(o))}</b></td></tr>
       ${o.platformFee ? `<tr><td colspan="4">Phí sàn ${esc(o.platform || '')} (cố định + dịch vụ + thanh toán)</td><td class="num">−${money(o.platformFee)}</td></tr>
       <tr><td colspan="4"><b>Thực nhận</b></td><td class="num"><b>${money(orderTotal(o) - o.platformFee)}</b></td></tr>` : ''}
+      ${isRevenue(o) && orderCogs(o) ? `<tr><td colspan="4">Giá vốn hàng${o.items.some(i => !itemCost(i)) ? ' <span class="delta down">(thiếu giá vốn một số SP)</span>' : ''}</td><td class="num">−${money(orderCogs(o))}</td></tr>
+      <tr><td colspan="4"><b>Lãi của đơn</b> <span class="muted small">(sau giá vốn${o.platformFee ? ' & phí sàn' : ''})</span></td><td class="num"><b>${money(orderTotal(o) - orderFee(o) - orderCogs(o))}</b> · ${pct((orderTotal(o) - orderFee(o) - orderCogs(o)) / (orderTotal(o) || 1))}</td></tr>` : ''}
     </tbody></table></div>
     <div class="detail-sec"><h4>Lịch sử tracking</h4>
       <ul class="timeline">${[...o.history].reverse().map(h => `<li style="--c:${statusOf(h.status).color}"><b>${statusOf(h.status).label}</b><time>${fmtDT(h.at)}</time>${h.note ? `<p>${esc(h.note)}</p>` : ''}</li>`).join('')}</ul>
@@ -686,21 +710,24 @@ function applyTemplate(i) {
 /* ---------- View: Thu – Chi ---------- */
 function renderFinance(el) {
   const r = periodRange(ui.finPeriod), m = metrics(r);
-  const expCats = sumBy(m.tx.filter(t => t.type === 'expense'), t => t.category, t => +t.amount);
-  if (m.platformFees) {
-    const row = expCats.find(c => c[0] === 'Phí sàn TMĐT');
-    if (row) row[1] += m.platformFees; else expCats.push(['Phí sàn TMĐT', m.platformFees]);
-    expCats.sort((a, b) => b[1] - a[1]);
-  }
-  // Lợi nhuận theo kênh bán: doanh thu − phí sàn − chi phí chiến dịch của kênh
+  const expCats = sumBy(m.tx.filter(isOpex), t => t.category, t => +t.amount);
+  [['Giá vốn hàng bán', m.cogs], ['Phí sàn TMĐT', m.platformFees]].forEach(([k, v]) => {
+    if (!v) return;
+    const row = expCats.find(c => c[0] === k);
+    if (row) row[1] += v; else expCats.push([k, v]);
+  });
+  expCats.sort((a, b) => b[1] - a[1]);
+  // Lợi nhuận theo kênh bán: doanh thu − giá vốn − phí sàn − chi phí chiến dịch của kênh
   const byCh = CHANNELS.map(ch => {
     const os = m.orders.filter(o => o.channel === ch);
     const rev = os.filter(isRevenue).reduce((s, o) => s + orderTotal(o), 0);
     const fee = os.reduce((s, o) => s + orderFee(o), 0);
+    const cogs = os.reduce((s, o) => s + orderCogs(o), 0);
     const ids = new Set(state.campaigns.filter(c => c.channel === ch).map(c => c.id));
     const mkt = m.tx.filter(t => t.type === 'expense' && ids.has(t.campaignId)).reduce((s, t) => s + +t.amount, 0);
-    return { ch, n: os.filter(isRevenue).length, rev, fee, mkt, net: rev - fee - mkt };
+    return { ch, n: os.filter(isRevenue).length, rev, cogs, fee, mkt, net: rev - cogs - fee - mkt };
   }).filter(x => x.rev || x.fee || x.mkt);
+  const step = (label, v, sign = '', strong = false) => `<li><span>${strong ? `<b>${label}</b>` : label}</span>${strong ? `<b>${sign}${money(v)}</b>` : `<span>${sign}${money(v)}</span>`}</li>`;
   let tx =m.tx.slice().sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
   if (ui.finType !== 'all') tx = tx.filter(t => t.type === ui.finType);
   el.innerHTML = `
@@ -708,23 +735,32 @@ function renderFinance(el) {
       <button class="btn" data-action="newTx" data-type="income">+ Ghi khoản thu</button>
       <button class="btn primary" data-action="newTx" data-type="expense">+ Ghi chi phí</button></div>
     <div class="kpis">
-      ${kpi('Doanh thu từ đơn hàng', money(m.orderRevenue), `${m.valid.length} đơn hợp lệ (không tính hủy/hoàn)`)}
-      ${kpi('Thu khác', money(m.otherIncome))}
-      ${kpi('Tổng chi phí', money(m.expense), m.platformFees ? `gồm ${money(m.platformFees)} phí sàn` : '')}
-      ${kpi('Lợi nhuận', money(m.profit), 'Biên ' + pct(m.revenue ? m.profit / m.revenue : 0))}
+      ${kpi('Doanh thu', money(m.revenue), `${m.valid.length} đơn hợp lệ${m.otherIncome ? ' · thu khác ' + money(m.otherIncome) : ''}`)}
+      ${kpi('Lãi gộp', money(m.grossProfit), `Sau giá vốn & phí sàn · biên ${pct(m.orderRevenue ? m.grossProfit / m.orderRevenue : 0)}`)}
+      ${kpi('Chi phí vận hành', money(m.opex), 'Quảng cáo, ship, mặt bằng, lương…')}
+      ${kpi('Lãi ròng', money(m.profit), 'Biên ' + pct(m.revenue ? m.profit / m.revenue : 0) + costWarning(m))}
     </div>
     <div class="grid-2">
-      <div class="card span-2"><h3>Dòng tiền theo ngày</h3><div class="chart-box"><canvas id="ch-fin"></canvas></div></div>
-      <div class="card"><h3>Chi phí theo hạng mục</h3>${hbars(expCats, 'exp')}</div>
-      <div class="card"><h3>Cơ cấu</h3><ul class="list">
-        <li><span>Chi phí / doanh thu</span><b>${pct(m.revenue ? m.expense / m.revenue : 0)}</b></li>
-        <li><span>Quảng cáo / doanh thu</span><b>${pct(m.revenue ? (expCats.find(c => c[0] === 'Quảng cáo')?.[1] || 0) / m.revenue : 0)}</b></li>
-        <li><span>Chi phí TB mỗi đơn</span><b>${money(m.valid.length ? m.expense / m.valid.length : 0)}</b></li>
-        <li><span>Lợi nhuận TB mỗi ngày</span><b>${money(m.profit / (daysBetween(r.start, r.end) + 1))}</b></li>
-      </ul></div>
-      <div class="card span-2 flush"><div class="card-h" style="padding:14px 16px 0"><h3>Lợi nhuận theo kênh bán</h3><span class="muted small">Chưa trừ giá vốn và chi phí chung (mặt bằng, lương…)</span></div>
-        <div class="table-wrap"><table class="tbl static"><thead><tr><th>Kênh</th><th class="num">Đơn</th><th class="num">Doanh thu</th><th class="num">Phí sàn</th><th class="num">Chi marketing</th><th class="num">Còn lại</th><th class="num">% còn lại</th></tr></thead><tbody>
-          ${byCh.map(x => `<tr><td><b>${esc(x.ch)}</b></td><td class="num">${x.n}</td><td class="num">${money(x.rev)}</td><td class="num">${x.fee ? '−' + money(x.fee) : '—'}</td><td class="num">${x.mkt ? '−' + money(x.mkt) : '—'}</td><td class="num"><b>${money(x.net)}</b></td><td class="num">${x.rev ? pct(x.net / x.rev) : '—'}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">Chưa có dữ liệu</td></tr>'}
+      <div class="card span-2"><h3>Doanh thu & chi phí theo ngày</h3><div class="chart-box"><canvas id="ch-fin"></canvas></div></div>
+      <div class="card"><h3>Báo cáo lãi lỗ</h3><ul class="list">
+        ${step('Doanh thu bán hàng', m.orderRevenue)}${m.otherIncome ? step('Thu khác', m.otherIncome, '+') : ''}
+        ${step('Giá vốn hàng bán', m.cogs, '−')}${step('Phí sàn TMĐT', m.platformFees, '−')}
+        ${step('Lãi gộp', m.grossProfit + m.otherIncome, '', true)}
+        ${step('Chi phí vận hành', m.opex, '−')}
+        ${step('Lãi ròng', m.profit, '', true)}
+      </ul>
+      <p class="muted small">${costMode()
+        ? `Tiền nhập hàng trong kỳ: <b>${money(m.purchases)}</b> – là tiền mua hàng dự trữ, được tính dần vào giá vốn khi bán nên không trừ thêm vào lãi.`
+        : 'Chưa nhập giá vốn: tiền “Nhập hàng” đang được tính thẳng vào chi phí. Nhập giá vốn ở mục <a href="#products">Sản phẩm</a> để tính lãi chính xác theo từng đơn.'}</p></div>
+      <div class="card"><h3>Chi phí theo hạng mục</h3>${hbars(expCats, 'exp')}
+        <ul class="list" style="margin-top:8px">
+          <li><span>Quảng cáo / doanh thu</span><b>${pct(m.revenue ? (expCats.find(c => c[0] === 'Quảng cáo')?.[1] || 0) / m.revenue : 0)}</b></li>
+          <li><span>Lãi ròng TB mỗi đơn</span><b>${money(m.valid.length ? m.profit / m.valid.length : 0)}</b></li>
+          <li><span>Lãi ròng TB mỗi ngày</span><b>${money(m.profit / (daysBetween(r.start, r.end) + 1))}</b></li>
+        </ul></div>
+      <div class="card span-2 flush"><div class="card-h" style="padding:14px 16px 0"><h3>Lợi nhuận theo kênh bán</h3><span class="muted small">Chưa trừ chi phí chung (mặt bằng, lương…)</span></div>
+        <div class="table-wrap"><table class="tbl static"><thead><tr><th>Kênh</th><th class="num">Đơn</th><th class="num">Doanh thu</th><th class="num">Giá vốn</th><th class="num">Phí sàn</th><th class="num">Chi marketing</th><th class="num">Còn lại</th><th class="num">% còn lại</th></tr></thead><tbody>
+          ${byCh.map(x => `<tr><td><b>${esc(x.ch)}</b></td><td class="num">${x.n}</td><td class="num">${money(x.rev)}</td><td class="num">${x.cogs ? '−' + money(x.cogs) : '—'}</td><td class="num">${x.fee ? '−' + money(x.fee) : '—'}</td><td class="num">${x.mkt ? '−' + money(x.mkt) : '—'}</td><td class="num"><b>${money(x.net)}</b></td><td class="num">${x.rev ? pct(x.net / x.rev) : '—'}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">Chưa có dữ liệu</td></tr>'}
         </tbody></table></div></div>
     </div>
     <div class="card flush">
@@ -881,6 +917,141 @@ function customerModal(id) {
       toast('Đã lưu khách hàng');
     });
   });
+}
+
+/* ---------- View: Sản phẩm & giá vốn ---------- */
+const PROD_PERIODS = [['30d', '30 ngày'], ['month', 'Tháng này'], ['all', 'Tất cả']];
+function productStats(r) {
+  const map = new Map();
+  state.orders.forEach(o => {
+    const counted = isRevenue(o) && (!r || inRange(dayOf(o.createdAt), r));
+    o.items.forEach(i => {
+      const k = itemKey(i);
+      let p = map.get(k);
+      if (!p) { p = { key: k, sku: i.sku || '', name: i.name, variants: new Set(), qty: 0, revenue: 0 }; map.set(k, p); }
+      if (i.size && i.size !== '—') p.variants.add(i.size);
+      if (counted) { p.qty += i.qty; p.revenue += i.qty * i.price; }
+    });
+  });
+  Object.keys(state.costs).forEach(k => {
+    if (!map.has(k)) map.set(k, { key: k, sku: k.startsWith('sku:') ? k.slice(4) : '', name: k.startsWith('name:') ? k.slice(5) : '', variants: new Set(), qty: 0, revenue: 0 });
+  });
+  return [...map.values()].map(p => ({ ...p, cost: +state.costs[p.key] || 0 }));
+}
+function prodKpis(list) {
+  const rev = list.reduce((s, p) => s + p.revenue, 0), cogs = list.reduce((s, p) => s + p.qty * p.cost, 0);
+  const missing = list.filter(p => !p.cost && p.qty), missRev = missing.reduce((s, p) => s + p.revenue, 0);
+  return `${kpi('Doanh thu sản phẩm', money(rev), `${list.filter(p => p.qty).length} mã đã bán`)}
+    ${kpi('Giá vốn hàng bán', money(cogs))}
+    ${kpi('Lãi gộp (trước phí sàn)', money(rev - cogs), 'Biên ' + pct(rev ? (rev - cogs) / rev : 0))}
+    ${kpi('Chưa có giá vốn', `${missing.length} mã`, missing.length ? `<span class="delta down">${pct(rev ? missRev / rev : 0)} doanh thu đang tính giá vốn = 0</span>` : '<span class="delta up">Đã đủ giá vốn</span>')}`;
+}
+function prodRowCells(qty, rev, cost) {
+  const avg = qty ? rev / qty : 0, unit = avg - cost;
+  return {
+    unit: cost ? money(unit) : '—', margin: cost && avg ? pct(unit / avg) : '—', total: cost ? money(rev - qty * cost) : '—',
+    cls: cost && avg && unit / avg < .3 ? 'delta down' : '',
+  };
+}
+function renderProducts(el) {
+  el.innerHTML = `
+    <div class="toolbar"><div class="seg">${PROD_PERIODS.map(([k, l]) => `<button class="${ui.prodPeriod === k ? 'on' : ''}" data-action="setProdPeriod" data-p="${k}">${l}</button>`).join('')}</div>
+      <span class="grow"></span>
+      <button class="btn" data-action="copySkuList" title="Sao chép danh sách để dán vào Excel, điền giá vốn rồi dán ngược lại">Sao chép danh sách SKU</button>
+      <button class="btn primary" data-action="pasteCosts">Dán giá vốn từ Excel</button></div>
+    <div class="kpis" id="prod-kpis"></div>
+    <div class="toolbar"><input id="prod-q" type="search" placeholder="Tìm SKU hoặc tên sản phẩm…" value="${esc(ui.prodQ)}">
+      <label class="inline-check"><input type="checkbox" id="prod-missing" ${ui.prodMissing ? 'checked' : ''}> Chỉ hiện mã chưa có giá vốn</label></div>
+    <div class="card flush"><div class="table-wrap"><table class="tbl static"><thead><tr><th>SKU</th><th>Sản phẩm</th><th class="num">Đã bán</th><th class="num">Doanh thu</th><th class="num">Giá bán TB</th><th class="num">Giá vốn / sp</th><th class="num">Lãi / sp</th><th class="num">Biên lãi</th><th class="num">Tổng lãi gộp</th></tr></thead>
+      <tbody id="prod-rows"></tbody></table></div></div>
+    <p class="muted small">Giá vốn = tiền hàng cho 1 sản phẩm (giá nhập hoặc chi phí may + vận chuyển về kho). Gõ giá vốn rồi nhấn Enter để sang dòng tiếp theo – tự lưu.
+      Lãi ở đây chưa trừ phí sàn, quảng cáo và chi phí chung; xem lãi ròng ở mục <a href="#finance">Thu – Chi</a>. Đổi giá vốn sẽ tính lại cho cả đơn cũ. Biên lãi dưới 30% được tô đỏ.</p>`;
+  $('#prod-q').addEventListener('input', e => { ui.prodQ = e.target.value; fillProdRows(); });
+  $('#prod-missing').addEventListener('change', e => { ui.prodMissing = e.target.checked; fillProdRows(); });
+  const rows = $('#prod-rows');
+  rows.addEventListener('change', e => {
+    if (!e.target.matches('.cost-input')) return;
+    const key = e.target.dataset.key, v = Math.max(0, Math.round(+e.target.value || 0));
+    if (v) state.costs[key] = v; else delete state.costs[key];
+    save();
+    const tr = e.target.closest('tr'), c = prodRowCells(+tr.dataset.qty, +tr.dataset.rev, v);
+    tr.querySelector('[data-c=unit]').textContent = c.unit;
+    const mg = tr.querySelector('[data-c=margin]'); mg.textContent = c.margin; mg.className = 'num ' + c.cls;
+    tr.querySelector('[data-c=total]').textContent = c.total;
+    $('#prod-kpis').innerHTML = prodKpis(productStats(ui.prodPeriod === 'all' ? null : periodRange(ui.prodPeriod)));
+  });
+  rows.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || !e.target.matches('.cost-input')) return;
+    e.preventDefault();
+    const inputs = $$('.cost-input', rows), next = inputs[inputs.indexOf(e.target) + 1];
+    e.target.dispatchEvent(new Event('change', { bubbles: true }));
+    if (next) { next.focus(); next.select(); } else e.target.blur();
+  });
+  fillProdRows();
+}
+function fillProdRows() {
+  const all = productStats(ui.prodPeriod === 'all' ? null : periodRange(ui.prodPeriod));
+  $('#prod-kpis').innerHTML = prodKpis(all);
+  const q = ui.prodQ.trim().toLowerCase();
+  let list = all.filter(p => p.qty || p.cost);
+  if (q) list = list.filter(p => (p.sku + ' ' + p.name + ' ' + [...p.variants].join(' ')).toLowerCase().includes(q));
+  if (ui.prodMissing) list = list.filter(p => !p.cost);
+  list.sort((a, b) => b.revenue - a.revenue || a.name.localeCompare(b.name, 'vi'));
+  $('#prod-rows').innerHTML = list.slice(0, 500).map(p => {
+    const c = prodRowCells(p.qty, p.revenue, p.cost);
+    const variants = [...p.variants].slice(0, 6).join(', ') + (p.variants.size > 6 ? '…' : '');
+    return `<tr data-qty="${p.qty}" data-rev="${p.revenue}"><td>${p.sku ? `<b>${esc(p.sku)}</b>` : '<span class="muted">—</span>'}</td>
+      <td class="prod-name"><span title="${esc(p.name)}">${esc(p.name)}</span>${variants ? `<div class="muted small">${esc(variants)}</div>` : ''}</td>
+      <td class="num">${p.qty}</td><td class="num">${money(p.revenue)}</td><td class="num">${p.qty ? money(p.revenue / p.qty) : '—'}</td>
+      <td class="num"><input class="cost-input" type="number" min="0" step="1000" inputmode="numeric" data-key="${esc(p.key)}" value="${p.cost || ''}" placeholder="Nhập giá vốn" aria-label="Giá vốn ${esc(p.sku || p.name)}"></td>
+      <td class="num" data-c="unit">${c.unit}</td><td class="num ${c.cls}" data-c="margin">${c.margin}</td><td class="num" data-c="total">${c.total}</td></tr>`;
+  }).join('') || `<tr><td colspan="9" class="empty">${state.orders.length ? 'Không có sản phẩm phù hợp' : 'Chưa có đơn hàng – hãy tạo đơn hoặc nhập đơn Shopee trước'}</td></tr>`;
+}
+
+function parseCostNumber(s) {
+  s = String(s || '').replace(/[₫đ\s]/gi, '');
+  if (/^\d+[.,]\d{1,2}$/.test(s)) return Math.round(parseFloat(s.replace(',', '.')));
+  const n = parseInt(s.replace(/[^\d]/g, ''), 10);
+  return isNaN(n) ? null : n;
+}
+function pasteCostsModal() {
+  openModal('Dán giá vốn từ Excel', `
+    <p class="muted">Trong Excel, chọn 2 cột <b>SKU</b> (hoặc tên sản phẩm) và <b>Giá vốn</b>, nhấn Ctrl+C rồi dán vào ô dưới.
+      Mẹo: bấm “Sao chép danh sách SKU” ở trang Sản phẩm, dán vào Excel, điền cột giá vốn rồi dán lại đây.</p>
+    <textarea id="cost-paste" style="width:100%;min-height:200px;font-family:ui-monospace,monospace" placeholder="DA1134K&#9;95000&#10;DA199DTN&#9;48000&#10;Áo thun basic&#9;75000"></textarea>
+    <p class="muted small" id="cost-preview"></p>
+    <div class="row-actions"><span style="flex:1"></span><button class="btn ghost" data-action="closeModal">Hủy</button><button class="btn primary" id="cost-apply">Cập nhật giá vốn</button></div>`, body => {
+    const stats = productStats(null);
+    const bySku = new Map(stats.filter(p => p.sku).map(p => [p.sku.toUpperCase(), p.key]));
+    const byName = new Map(stats.map(p => [p.name.normalize('NFC').trim().toLowerCase(), p.key]));
+    const parse = () => $('#cost-paste', body).value.split(/\r?\n/).map(line => {
+      // Giữ ô trống: giá vốn luôn là cột CUỐI; cột cuối trống thì bỏ qua dòng (không lấy nhầm cột giá bán)
+      let parts = /\t|;/.test(line) ? line.split(/\t|;/).map(s => s.trim()) : [];
+      if (!parts.length) { const m = /^(.*\S)\s+(\S+)$/.exec(line.trim()); parts = m ? [m[1], m[2]] : []; }
+      const token0 = parts.find(Boolean);
+      if (parts.length < 2 || !token0 || !parts[parts.length - 1]) return null;
+      const cost = parseCostNumber(parts[parts.length - 1]);
+      if (cost == null) return null;   // dòng tiêu đề
+      const token = token0.normalize('NFC'), up = token.toUpperCase(), low = token.toLowerCase();
+      const key = bySku.get(up) || byName.get(low) || (/\s/.test(token) ? 'name:' + low : 'sku:' + up);
+      return { key, cost, known: bySku.has(up) || byName.has(low) };
+    }).filter(Boolean);
+    const preview = () => { const r = parse(); $('#cost-preview', body).textContent = r.length ? `${r.length} dòng hợp lệ · ${r.filter(x => x.known).length} khớp sản phẩm đã bán · ${r.filter(x => !x.known).length} mã mới` : ''; };
+    $('#cost-paste', body).addEventListener('input', preview);
+    $('#cost-apply', body).addEventListener('click', () => {
+      const r = parse();
+      if (!r.length) { toast('Chưa có dòng hợp lệ (cần 2 cột: SKU và giá vốn)'); return; }
+      r.forEach(x => { if (x.cost > 0) state.costs[x.key] = x.cost; else delete state.costs[x.key]; });
+      save(); closeModal(); toast(`Đã cập nhật giá vốn cho ${r.length} mã`); rerender();
+    });
+  });
+}
+async function copySkuList() {
+  const list = productStats(null).filter(p => p.qty || p.cost).sort((a, b) => b.revenue - a.revenue);
+  const tsv = ['SKU\tTên sản phẩm\tĐã bán\tGiá bán TB\tGiá vốn',
+    ...list.map(p => [p.sku || p.name, p.sku ? p.name : '', p.qty, p.qty ? Math.round(p.revenue / p.qty) : '', p.cost || ''].join('\t'))].join('\n');
+  try { await navigator.clipboard.writeText(tsv); toast(`Đã sao chép ${list.length} mã – dán vào Excel`); }
+  catch (e) { openModal('Danh sách SKU', `<p class="muted">Chọn hết (Ctrl+A), sao chép (Ctrl+C) rồi dán vào Excel.</p><textarea style="width:100%;min-height:260px">${esc(tsv)}</textarea>`); }
 }
 
 /* ---------- View: Marketing ---------- */
@@ -1252,6 +1423,9 @@ const ACTIONS = {
     save(); closeModal(); rerender();
   },
   custDay: d => { ui.custDay = d.d === '0' ? todayStr() : ymd(addDays(parseDay(ui.custDay), +d.d)); if (ui.custDay > todayStr()) ui.custDay = todayStr(); rerender(); },
+  setProdPeriod: d => { ui.prodPeriod = d.p; rerender(); },
+  pasteCosts: () => pasteCostsModal(),
+  copySkuList: () => copySkuList(),
   setMktPeriod: d => { ui.mktPeriod = d.p; rerender(); },
   filterMkt: d => { ui.mktStage = ui.mktStage === d.s ? 'all' : d.s; rerender(); },
   newCampaign: () => campaignModal(),
