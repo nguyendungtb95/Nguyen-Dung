@@ -22,8 +22,8 @@ const TASK_COLS = [
 ];
 const PRIO = { high: 'Gấp', medium: 'Vừa', low: 'Thấp' };
 const CHANNELS = ['Website', 'Facebook', 'Instagram', 'Shopee', 'TikTok Shop', 'Tại cửa hàng'];
-const CARRIERS = ['GHN', 'GHTK', 'Viettel Post', 'J&T Express', 'Ninja Van', 'Tự giao'];
-const EXPENSE_CATS = ['Nhập hàng', 'Quảng cáo', 'Vận chuyển', 'Mặt bằng', 'Lương nhân viên', 'Bao bì', 'Khác'];
+const CARRIERS = ['GHN', 'GHTK', 'Viettel Post', 'J&T Express', 'Ninja Van', 'SPX Express', 'beDelivery', 'Xanh SM', 'Tự giao'];
+const EXPENSE_CATS = ['Nhập hàng', 'Quảng cáo', 'Phí sàn TMĐT', 'Vận chuyển', 'Mặt bằng', 'Lương nhân viên', 'Bao bì', 'Khác'];
 const INCOME_CATS = ['Bán sỉ', 'Thanh lý', 'Thu khác'];
 const CARE_TYPES = ['Gọi điện', 'Nhắn tin', 'Tư vấn', 'Gửi ưu đãi', 'Xin feedback', 'Xử lý khiếu nại'];
 const SIZES = ['S', 'M', 'L', 'XL', 'Free'];
@@ -77,10 +77,13 @@ const opts = (list, sel) => list.map(v => `<option ${v === sel ? 'selected' : ''
 const daysBetween = (a, b) => Math.round((parseDay(b) - parseDay(a)) / 864e5);
 
 function nextId(prefix, list, width = 4) {
-  const max = list.reduce((m, x) => Math.max(m, parseInt(String(x.id).replace(/\D/g, ''), 10) || 0), 0);
+  // Chỉ xét mã cùng tiền tố (đơn nhập từ sàn giữ nguyên mã sàn, không ảnh hưởng số thứ tự)
+  const re = new RegExp('^' + prefix + '(\\d+)$');
+  const max = list.reduce((m, x) => { const r = re.exec(String(x.id)); return r ? Math.max(m, +r[1]) : m; }, 0);
   return prefix + pad(max + 1, width);
 }
 const orderTotal = o => o.items.reduce((s, i) => s + i.qty * i.price, 0) + (+o.shippingFee || 0) - (+o.discount || 0);
+const orderFee = o => o.status === 'cancelled' ? 0 : (+o.platformFee || 0);
 const statusOf = k => STATUSES.find(s => s.key === k) || STATUSES[0];
 const badge = k => { const s = statusOf(k); return `<span class="badge" style="--c:${s.color}">${s.label}</span>`; };
 const custById = id => state.customers.find(c => c.id === id);
@@ -273,10 +276,11 @@ function metrics(r) {
   const orderRevenue = valid.reduce((s, o) => s + orderTotal(o), 0);
   const tx = state.transactions.filter(t => inRange(t.date, r));
   const otherIncome = tx.filter(t => t.type === 'income').reduce((s, t) => s + +t.amount, 0);
-  const expense = tx.filter(t => t.type === 'expense').reduce((s, t) => s + +t.amount, 0);
+  const platformFees = orders.reduce((s, o) => s + orderFee(o), 0);
+  const expense = tx.filter(t => t.type === 'expense').reduce((s, t) => s + +t.amount, 0) + platformFees;
   const revenue = orderRevenue + otherIncome;
   return {
-    orders, valid, tx, orderRevenue, otherIncome, revenue, expense, profit: revenue - expense,
+    orders, valid, tx, orderRevenue, otherIncome, revenue, expense, platformFees, profit: revenue - expense,
     newCustomers: state.customers.filter(c => inRange(dayOf(c.createdAt), r)).length,
     badRate: orders.length ? orders.filter(o => !isRevenue(o)).length / orders.length : 0,
     aov: valid.length ? orderRevenue / valid.length : 0,
@@ -286,7 +290,11 @@ function dailySeries(r) {
   const days = [];
   for (let d = parseDay(r.start), e = parseDay(r.end); d <= e; d = addDays(d, 1)) days.push(ymd(d));
   const rev = Object.fromEntries(days.map(x => [x, 0])), exp = { ...rev };
-  state.orders.forEach(o => { const k = dayOf(o.createdAt); if (k in rev && isRevenue(o)) rev[k] += orderTotal(o); });
+  state.orders.forEach(o => {
+    const k = dayOf(o.createdAt); if (!(k in rev)) return;
+    if (isRevenue(o)) rev[k] += orderTotal(o);
+    exp[k] += orderFee(o);
+  });
   state.transactions.forEach(t => { if (t.date in rev) (t.type === 'income' ? rev : exp)[t.date] += +t.amount; });
   return { days, rev: days.map(x => rev[x]), exp: days.map(x => exp[x]) };
 }
@@ -432,6 +440,7 @@ function renderOrders(el) {
       <input id="order-q" type="search" placeholder="Tra cứu: mã đơn, tên, SĐT hoặc mã vận đơn…" value="${esc(ui.orderQ)}">
       <select id="order-ch"><option value="all">Tất cả kênh</option>${CHANNELS.map(c => `<option ${ui.orderChannel === c ? 'selected' : ''}>${c}</option>`).join('')}</select>
       ${ui.orderStatus !== 'all' ? `<button class="btn ghost" data-action="filterStatus" data-s="all">Bỏ lọc: ${statusOf(ui.orderStatus).label} ×</button>` : ''}
+      <label class="btn" title="Chọn file Excel xuất từ Kênh Người Bán Shopee → Quản Lý Đơn Hàng → Xuất">Nhập đơn Shopee (Excel)<input type="file" id="shopee-file" accept=".xlsx" hidden></label>
     </div>
     <div class="card flush"><div class="table-wrap"><table class="tbl">
       <thead><tr><th>Mã đơn</th><th>Khách hàng</th><th>Ngày tạo</th><th>Kênh</th><th class="num">Tổng tiền</th><th>Vận chuyển</th><th>Trạng thái</th><th></th></tr></thead>
@@ -439,6 +448,7 @@ function renderOrders(el) {
     <p class="muted small" id="order-count"></p>`;
   $('#order-q').addEventListener('input', e => { ui.orderQ = e.target.value; fillOrderRows(); });
   $('#order-ch').addEventListener('change', e => { ui.orderChannel = e.target.value; fillOrderRows(); });
+  $('#shopee-file').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) importShopeeFile(f); });
   fillOrderRows();
 }
 function fillOrderRows() {
@@ -486,7 +496,7 @@ function advanceOrder(id, fromModal) {
 function trackingModal(o, thenShip) {
   openModal(`Mã vận đơn – ${o.id}`, `
     <form class="form" id="f-track">
-      <label>Đơn vị vận chuyển<select name="carrier">${opts(CARRIERS, o.carrier)}</select></label>
+      <label>Đơn vị vận chuyển<select name="carrier">${opts(CARRIERS.includes(o.carrier) || !o.carrier ? CARRIERS : [o.carrier, ...CARRIERS], o.carrier)}</select></label>
       <label>Mã vận đơn<input name="code" value="${esc(o.trackingCode)}" placeholder="VD: GHN123456789" ${thenShip ? 'required' : ''}></label>
       <div class="form-actions"><button type="button" class="btn ghost" data-action="viewOrder" data-id="${o.id}">Quay lại</button>
       <button class="btn primary">${thenShip ? 'Lưu & chuyển sang Đang giao' : 'Lưu'}</button></div>
@@ -516,12 +526,15 @@ function viewOrder(id) {
       <div><span>Địa chỉ</span>${esc(c.address || '—')}</div>
       <div><span>Kênh bán · Chiến dịch</span>${esc(o.channel)} · ${campById(o.campaignId) ? `<a class="clickable" data-action="viewCampaign" data-id="${o.campaignId}">${esc(campById(o.campaignId).name)}</a>` : 'Tự nhiên'}</div>
       <div><span>Vận chuyển</span>${esc(o.carrier || '—')} · <b>${esc(o.trackingCode || 'chưa có mã')}</b></div>
+      ${o.platform ? `<div><span>Mã đơn ${esc(o.platform)}</span><b>${esc(o.platformOrderId)}</b></div><div><span>Thanh toán · Hình thức giao</span>${esc(o.payment || '—')} · ${esc(o.shippingMethod || '—')}</div>` : ''}
       ${o.note ? `<div style="grid-column:1/-1"><span>Ghi chú</span>${esc(o.note)}</div>` : ''}
     </div>
     <div class="table-wrap"><table class="tbl"><thead><tr><th>Sản phẩm</th><th>Size</th><th class="num">SL</th><th class="num">Đơn giá</th><th class="num">Thành tiền</th></tr></thead><tbody>
       ${o.items.map(i => `<tr><td>${esc(i.name)}</td><td>${esc(i.size)}</td><td class="num">${i.qty}</td><td class="num">${money(i.price)}</td><td class="num">${money(i.qty * i.price)}</td></tr>`).join('')}
       <tr><td colspan="4">Tạm tính · Phí ship · Giảm giá</td><td class="num">${money(sub)} + ${money(o.shippingFee)} − ${money(o.discount)}</td></tr>
       <tr><td colspan="4"><b>Tổng cộng</b></td><td class="num"><b>${money(orderTotal(o))}</b></td></tr>
+      ${o.platformFee ? `<tr><td colspan="4">Phí sàn ${esc(o.platform || '')} (cố định + dịch vụ + thanh toán)</td><td class="num">−${money(o.platformFee)}</td></tr>
+      <tr><td colspan="4"><b>Thực nhận</b></td><td class="num"><b>${money(orderTotal(o) - o.platformFee)}</b></td></tr>` : ''}
     </tbody></table></div>
     <div class="detail-sec"><h4>Lịch sử tracking</h4>
       <ul class="timeline">${[...o.history].reverse().map(h => `<li style="--c:${statusOf(h.status).color}"><b>${statusOf(h.status).label}</b><time>${fmtDT(h.at)}</time>${h.note ? `<p>${esc(h.note)}</p>` : ''}</li>`).join('')}</ul>
@@ -674,7 +687,21 @@ function applyTemplate(i) {
 function renderFinance(el) {
   const r = periodRange(ui.finPeriod), m = metrics(r);
   const expCats = sumBy(m.tx.filter(t => t.type === 'expense'), t => t.category, t => +t.amount);
-  let tx = m.tx.slice().sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
+  if (m.platformFees) {
+    const row = expCats.find(c => c[0] === 'Phí sàn TMĐT');
+    if (row) row[1] += m.platformFees; else expCats.push(['Phí sàn TMĐT', m.platformFees]);
+    expCats.sort((a, b) => b[1] - a[1]);
+  }
+  // Lợi nhuận theo kênh bán: doanh thu − phí sàn − chi phí chiến dịch của kênh
+  const byCh = CHANNELS.map(ch => {
+    const os = m.orders.filter(o => o.channel === ch);
+    const rev = os.filter(isRevenue).reduce((s, o) => s + orderTotal(o), 0);
+    const fee = os.reduce((s, o) => s + orderFee(o), 0);
+    const ids = new Set(state.campaigns.filter(c => c.channel === ch).map(c => c.id));
+    const mkt = m.tx.filter(t => t.type === 'expense' && ids.has(t.campaignId)).reduce((s, t) => s + +t.amount, 0);
+    return { ch, n: os.filter(isRevenue).length, rev, fee, mkt, net: rev - fee - mkt };
+  }).filter(x => x.rev || x.fee || x.mkt);
+  let tx =m.tx.slice().sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
   if (ui.finType !== 'all') tx = tx.filter(t => t.type === ui.finType);
   el.innerHTML = `
     <div class="toolbar">${periodSeg(ui.finPeriod, 'setFinPeriod')}<span class="grow"></span>
@@ -683,7 +710,7 @@ function renderFinance(el) {
     <div class="kpis">
       ${kpi('Doanh thu từ đơn hàng', money(m.orderRevenue), `${m.valid.length} đơn hợp lệ (không tính hủy/hoàn)`)}
       ${kpi('Thu khác', money(m.otherIncome))}
-      ${kpi('Tổng chi phí', money(m.expense))}
+      ${kpi('Tổng chi phí', money(m.expense), m.platformFees ? `gồm ${money(m.platformFees)} phí sàn` : '')}
       ${kpi('Lợi nhuận', money(m.profit), 'Biên ' + pct(m.revenue ? m.profit / m.revenue : 0))}
     </div>
     <div class="grid-2">
@@ -695,6 +722,10 @@ function renderFinance(el) {
         <li><span>Chi phí TB mỗi đơn</span><b>${money(m.valid.length ? m.expense / m.valid.length : 0)}</b></li>
         <li><span>Lợi nhuận TB mỗi ngày</span><b>${money(m.profit / (daysBetween(r.start, r.end) + 1))}</b></li>
       </ul></div>
+      <div class="card span-2 flush"><div class="card-h" style="padding:14px 16px 0"><h3>Lợi nhuận theo kênh bán</h3><span class="muted small">Chưa trừ giá vốn và chi phí chung (mặt bằng, lương…)</span></div>
+        <div class="table-wrap"><table class="tbl static"><thead><tr><th>Kênh</th><th class="num">Đơn</th><th class="num">Doanh thu</th><th class="num">Phí sàn</th><th class="num">Chi marketing</th><th class="num">Còn lại</th><th class="num">% còn lại</th></tr></thead><tbody>
+          ${byCh.map(x => `<tr><td><b>${esc(x.ch)}</b></td><td class="num">${x.n}</td><td class="num">${money(x.rev)}</td><td class="num">${x.fee ? '−' + money(x.fee) : '—'}</td><td class="num">${x.mkt ? '−' + money(x.mkt) : '—'}</td><td class="num"><b>${money(x.net)}</b></td><td class="num">${x.rev ? pct(x.net / x.rev) : '—'}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">Chưa có dữ liệu</td></tr>'}
+        </tbody></table></div></div>
     </div>
     <div class="card flush">
       <div class="card-h" style="padding:14px 16px 0"><h3>Sổ thu – chi</h3>

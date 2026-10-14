@@ -122,7 +122,8 @@ textarea { resize: vertical; min-height: 64px; }
 
 .hbar { margin-bottom: 10px; }
 .hbar-l { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; margin-bottom: 4px; }
-.hbar-l b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.hbar-l b { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hbar-l span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hbar-t { height: 8px; background: var(--panel-2); border-radius: 99px; overflow: hidden; }
 .hbar-t i { display: block; height: 100%; background: var(--c-rev); border-radius: 99px; }
 .hbar-t.exp i { background: var(--c-exp); }

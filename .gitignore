@@ -1,5 +1,8 @@
 .claude/
 *.json.bak
 fashion-store-backup-*.json
+*.xlsx
+*.xls
+*.csv
 Thumbs.db
 .DS_Store
