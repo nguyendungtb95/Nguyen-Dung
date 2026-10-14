@@ -87,7 +87,8 @@ function nextId(prefix, list, width = 4) {
 const orderTotal = o => o.items.reduce((s, i) => s + i.qty * i.price, 0) + (+o.shippingFee || 0) + (+o.adjust || 0) - (+o.discount || 0);
 /* Thuế (hộ kinh doanh): sales = % trên doanh thu (1% GTGT + 0,5% TNCN), feeVat = % thuế sàn tính trên phí sàn,
    salesChannels = [] nghĩa là áp dụng mọi kênh. Thuế quảng cáo đặt theo từng tài khoản Ads (accTax). */
-const TAX_DEFAULT = { sales: 1.5, feeVat: 8, salesChannels: [] };
+// feeVat = 0: phí trong file đơn hàng Shopee ĐÃ gồm thuế (kiểm tra 9/2026: phí cố định = 15% × 1,1; phí dịch vụ = 5% × 1,1 + 3.000)
+const TAX_DEFAULT = { sales: 1.5, feeVat: 0, salesChannels: [] };
 const taxes = () => ({ ...TAX_DEFAULT, ...(state.taxes || {}) });
 const ADS_TAX_DEFAULT = { Facebook: 10, Instagram: 10, 'TikTok Shop': 8, Shopee: 8 };
 const accTaxPct = a => a && a.taxRate != null && a.taxRate !== '' ? +a.taxRate : (ADS_TAX_DEFAULT[a?.channel] || 0);
@@ -1000,7 +1001,7 @@ function taxModal() {
         <div class="tax-ch">${CHANNELS.map(c => `<label class="inline-check"><input type="checkbox" name="ch" value="${esc(c)}" ${all || t.salesChannels.includes(c) ? 'checked' : ''}> ${esc(c)}</label>`).join('')}</div></div>
       <div class="section-t">Thuế trên phí sàn (Shopee, TikTok Shop…)</div>
       <label>Tỷ lệ (% trên phí cố định + dịch vụ + thanh toán)<input name="feeVat" type="number" min="0" max="100" step="0.1" value="${t.feeVat}"></label>
-      <p class="muted small" style="align-self:end">Nếu số phí trong file của sàn đã gồm thuế thì đặt 0 để không tính hai lần.</p>
+      <p class="muted small" style="align-self:end">Để <b>0</b> khi nhập file đơn hàng Shopee: phí trong file <b>đã gồm thuế</b> (đã đối chiếu dữ liệu tháng 9). Chỉ nhập % khi bạn tự ghi phí <b>chưa thuế</b>.</p>
       <div class="section-t">Thuế cộng thêm trên chi phí quảng cáo</div>
       ${(state.adAccounts || []).map(a => `<label>${esc(a.name)} (%)<input name="ad_${a.id}" type="number" min="0" max="100" step="0.1" value="${accTaxPct(a)}"></label>`).join('') || '<p class="muted small full">Chưa có tài khoản quảng cáo – mở trang Chi phí quảng cáo để tạo.</p>'}
       <p class="muted small full">Số nhập ở trang Chi phí quảng cáo là số <b>chưa thuế</b> (như trên trình quản lý quảng cáo); app tự cộng thuế khi tính chi phí và lãi.</p>
