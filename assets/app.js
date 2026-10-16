@@ -95,6 +95,22 @@ const accTaxPct = a => a && a.taxRate != null && a.taxRate !== '' ? +a.taxRate :
 const orderFeeBase = o => o.status === 'cancelled' ? 0 : (+o.platformFee || 0);
 const orderFeeTax = o => orderFeeBase(o) * taxes().feeVat / 100;
 const orderFee = o => orderFeeBase(o) + orderFeeTax(o);   // phí sàn gồm thuế
+/* Hóa đơn phí sàn hằng tháng (Shopee/TikTok gửi mỗi shop 1 hóa đơn): phí cố định / dịch vụ / giao dịch đã có theo
+   từng đơn → chỉ để đối chiếu; PiShip & phí khác CHỈ có trên hóa đơn → cộng vào chi phí, chia đều cho các ngày trong tháng */
+const invLabel = inv => inv.shop ? `${inv.platform} · ${inv.shop}` : inv.platform;
+// Cộng VAT theo từng dòng rồi làm tròn từng dòng – giống cách sàn lập hóa đơn
+const withVat = (inv, keys) => keys.reduce((s, k) => { const v = +inv[k] || 0; return s + v + Math.round(v * (+inv.vat || 0) / 100); }, 0);
+const invoiceExtra = inv => withVat(inv, ['piship', 'other']);
+const monthDays = ym => { const [y, m] = ym.split('-').map(Number); return new Date(y, m, 0).getDate(); };
+function invoiceExtraIn(r, label) {
+  let s = 0;
+  (state.platformInvoices || []).forEach(inv => {
+    if (!inv.month || (label && invLabel(inv) !== label)) return;
+    const n = monthDays(inv.month), per = invoiceExtra(inv) / n;
+    for (let d = 1; d <= n; d++) if (inRange(`${inv.month}-${pad(d)}`, r)) s += per;
+  });
+  return s;
+}
 const salesTaxApplies = o => { const ch = taxes().salesChannels; return !ch.length || ch.includes(o.channel); };
 const orderSalesTax = o => isRevenue(o) && salesTaxApplies(o) ? orderTotal(o) * taxes().sales / 100 : 0;
 // Phí vận chuyển shop tự trả cho hãng (VD: SPX – gồm phí hoàn hàng, phí COD, bảo hiểm); đơn hủy trước khi gửi không tốn phí
@@ -185,6 +201,8 @@ function normalize(d) {
     org: d.org && typeof d.org === 'object' ? d.org : null,
     // Cài đặt thuế (hộ kinh doanh) – xem TAX_DEFAULT
     taxes: d.taxes && typeof d.taxes === 'object' ? d.taxes : null,
+    // Hóa đơn phí sàn hằng tháng (PiShip, đối soát) – xem invoiceExtraIn
+    platformInvoices: Array.isArray(d.platformInvoices) ? d.platformInvoices : [],
     demo: !!d.demo,
   };
 }
@@ -368,12 +386,13 @@ function metrics(r) {
   const feeTax = orders.reduce((s, o) => s + orderFeeTax(o), 0);
   const salesTax = valid.reduce((s, o) => s + orderSalesTax(o), 0);
   const affiliate = tx.filter(t => t.type === 'expense' && t.category === AFFILIATE_CAT).reduce((s, t) => s + +t.amount, 0);
-  const expense = opex + adSpend + platformFees + shipCosts + cogs + salesTax;
+  const invoiceFees = invoiceExtraIn(r);
+  const expense = opex + adSpend + platformFees + invoiceFees + shipCosts + cogs + salesTax;
   const revenue = orderRevenue + otherIncome;
   return {
-    orders, valid, tx, orderRevenue, otherIncome, revenue, expense, platformFees, shipCosts, cogs, opex, adSpend, purchases, missingCostRevenue,
+    orders, valid, tx, orderRevenue, otherIncome, revenue, expense, platformFees, invoiceFees, shipCosts, cogs, opex, adSpend, purchases, missingCostRevenue,
     adTax, feeTax, salesTax, affiliate, taxTotal: adTax + feeTax + salesTax,
-    grossProfit: orderRevenue - cogs - platformFees - shipCosts - salesTax, profit: revenue - expense,
+    grossProfit: orderRevenue - cogs - platformFees - invoiceFees - shipCosts - salesTax, profit: revenue - expense,
     newCustomers: state.customers.filter(c => inRange(dayOf(c.createdAt), r)).length,
     badRate: orders.length ? orders.filter(o => !isRevenue(o)).length / orders.length : 0,
     aov: valid.length ? orderRevenue / valid.length : 0,
@@ -392,7 +411,7 @@ function dailySeries(r) {
     if (!(t.date in rev)) return;
     if (t.type === 'income') rev[t.date] += +t.amount; else if (isOpex(t)) exp[t.date] += +t.amount;
   });
-  days.forEach(d => { exp[d] += adSpendDay(d); });
+  days.forEach(d => { exp[d] += adSpendDay(d) + invoiceExtraIn({ start: d, end: d }); });
   return { days, rev: days.map(x => rev[x]), exp: days.map(x => exp[x]) };
 }
 function customerStats() {
@@ -916,7 +935,7 @@ function applyTemplate(i) {
 function renderFinance(el) {
   const r = periodRange(ui.finPeriod), m = metrics(r);
   const expCats = sumBy(m.tx.filter(isOpex), t => t.category, t => +t.amount);
-  [['Giá vốn hàng bán', m.cogs], ['Phí sàn TMĐT', m.platformFees - m.feeTax], ['Vận chuyển', m.shipCosts], ['Quảng cáo', m.adSpend - m.adTax],
+  [['Giá vốn hàng bán', m.cogs], ['Phí sàn TMĐT', m.platformFees - m.feeTax + m.invoiceFees], ['Vận chuyển', m.shipCosts], ['Quảng cáo', m.adSpend - m.adTax],
     ['Thuế', m.taxTotal]].forEach(([k, v]) => {
     if (!v) return;
     const row = expCats.find(c => c[0] === k);
@@ -925,11 +944,11 @@ function renderFinance(el) {
   expCats.sort((a, b) => b[1] - a[1]);
   // Lợi nhuận theo kênh bán: doanh thu − giá vốn − phí sàn − chi phí chiến dịch của kênh
   // Mỗi kênh một dòng; kênh bán trên nhiều shop (VD Shopee) tách thành từng shop
-  const chKeys = [...new Set([...CHANNELS, ...m.orders.map(channelLabel), ...state.adAccounts.map(accLabel)])];
+  const chKeys = [...new Set([...CHANNELS, ...m.orders.map(channelLabel), ...state.adAccounts.map(accLabel), ...state.platformInvoices.map(invLabel)])];
   const byCh = chKeys.map(ch => {
     const os = m.orders.filter(o => channelLabel(o) === ch);
     const rev = os.filter(isRevenue).reduce((s, o) => s + orderTotal(o), 0);
-    const fee = os.reduce((s, o) => s + orderFee(o) + orderShip(o) + orderSalesTax(o), 0);
+    const fee = os.reduce((s, o) => s + orderFee(o) + orderShip(o) + orderSalesTax(o), 0) + invoiceExtraIn(r, ch);
     const cogs = os.reduce((s, o) => s + orderCogs(o), 0);
     const ids = new Set(state.campaigns.filter(c => c.channel === ch).map(c => c.id));
     const mkt = m.tx.filter(t => t.type === 'expense' && ids.has(t.campaignId)).reduce((s, t) => s + +t.amount, 0) + adSpendFor(r, ch, true);
@@ -955,7 +974,8 @@ function renderFinance(el) {
       <div class="card"><h3>Báo cáo lãi lỗ</h3><ul class="list">
         ${step('Doanh thu bán hàng', m.orderRevenue)}${m.otherIncome ? step('Thu khác', m.otherIncome, '+') : ''}
         ${step('Giá vốn hàng bán', m.cogs, '−')}
-        ${m.platformFees ? step('Phí sàn TMĐT', m.platformFees - m.feeTax, '−') : ''}${m.feeTax ? step(`Thuế trên phí sàn (${taxes().feeVat}%)`, m.feeTax, '−') : ''}
+        ${m.platformFees ? step('Phí sàn TMĐT (theo từng đơn, đã gồm VAT)', m.platformFees - m.feeTax, '−') : ''}${m.feeTax ? step(`Thuế trên phí sàn (${taxes().feeVat}%)`, m.feeTax, '−') : ''}
+        ${m.invoiceFees ? step('Phí sàn theo hóa đơn tháng (PiShip, phí khác)', m.invoiceFees, '−') : ''}
         ${m.shipCosts ? step('Phí vận chuyển shop trả', m.shipCosts, '−') : ''}
         ${m.salesTax ? step(`Thuế bán hàng (${String(taxes().sales).replace('.', ',')}% doanh thu)`, m.salesTax, '−') : ''}
         ${step('Lãi gộp', m.grossProfit + m.otherIncome, '', true)}
@@ -977,6 +997,7 @@ function renderFinance(el) {
         <div class="table-wrap"><table class="tbl static"><thead><tr><th>Kênh</th><th class="num">Đơn</th><th class="num">Doanh thu</th><th class="num">Giá vốn</th><th class="num">Phí sàn, ship & thuế</th><th class="num">Chi marketing</th><th class="num">Còn lại</th><th class="num">% còn lại</th></tr></thead><tbody>
           ${byCh.map(x => `<tr><td><b>${esc(x.ch)}</b></td><td class="num">${x.n}</td><td class="num">${money(x.rev)}</td><td class="num">${x.cogs ? '−' + money(x.cogs) : '—'}</td><td class="num">${x.fee ? '−' + money(x.fee) : '—'}</td><td class="num">${x.mkt ? '−' + money(x.mkt) : '—'}</td><td class="num"><b>${money(x.net)}</b></td><td class="num">${x.rev ? pct(x.net / x.rev) : '—'}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">Chưa có dữ liệu</td></tr>'}
         </tbody></table></div></div>
+      ${invoiceCardHtml()}
     </div>
     <div class="card flush">
       <div class="card-h" style="padding:14px 16px 0"><h3>Sổ thu – chi</h3>
@@ -988,6 +1009,79 @@ function renderFinance(el) {
       </tbody></table></div></div>`;
   $('#fin-type').addEventListener('change', e => { ui.finType = e.target.value; rerender(); });
   dailyChart($('#ch-fin'), dailySeries(chartRange(r)));
+}
+/* ---------- Hóa đơn phí sàn hằng tháng ---------- */
+// Phí theo đơn mà app đã ghi nhận cho 1 shop, tính theo THÁNG HOÀN THÀNH đơn (giống cách sàn lập hóa đơn)
+function invoiceAppFees(inv) {
+  return state.orders.filter(o => o.platform === inv.platform && (o.shop || '') === (inv.shop || '')).reduce((s, o) => {
+    const h = [...(o.history || [])].reverse().find(x => x.status === 'delivered' || x.status === 'returned');
+    return h && dayOf(h.at).slice(0, 7) === inv.month ? s + orderFeeBase(o) : s;
+  }, 0);
+}
+const invoicePerOrder = inv => withVat(inv, ['fixed', 'service', 'transaction']);
+const invoiceTotal = inv => invoicePerOrder(inv) + invoiceExtra(inv);
+function invoiceCardHtml() {
+  const list = state.platformInvoices.slice().sort((a, b) => b.month.localeCompare(a.month) || invLabel(a).localeCompare(invLabel(b)));
+  return `<div class="card span-2 flush"><div class="card-h" style="padding:14px 16px 0"><div><h3>Hóa đơn phí sàn hằng tháng</h3>
+      <span class="muted small">PiShip & phí chỉ có trên hóa đơn được cộng vào chi phí của đúng shop, chia đều theo ngày trong tháng</span></div>
+      <button class="btn sm primary" data-action="newInvoice">+ Nhập hóa đơn</button></div>
+    <div class="table-wrap"><table class="tbl"><thead><tr><th>Tháng</th><th>Sàn · Shop</th><th>Số HĐ</th><th class="num">Phí theo đơn trên HĐ<div class="muted small">gồm VAT</div></th><th class="num">App ghi nhận<div class="muted small">đơn hoàn thành trong tháng</div></th><th class="num">Chênh lệch</th><th class="num">PiShip + khác<div class="muted small">đã cộng chi phí</div></th><th class="num">Tổng thanh toán</th></tr></thead><tbody>
+    ${list.map(inv => {
+      const hd = invoicePerOrder(inv), app = invoiceAppFees(inv), diff = hd - app, rel = hd ? Math.abs(diff) / hd : 0;
+      return `<tr data-action="editInvoice" data-id="${inv.id}"><td><b>${inv.month.slice(5)}/${inv.month.slice(0, 4)}</b></td><td>${esc(invLabel(inv))}</td><td class="muted">${esc(inv.invoiceNo || '—')}</td>
+        <td class="num">${money(hd)}</td><td class="num">${app ? money(app) : '<span class="muted">—</span>'}</td>
+        <td class="num ${rel > .1 ? 'delta down' : ''}">${app ? (diff >= 0 ? '+' : '−') + money(Math.abs(diff)) + `<div class="muted small">${pct(rel)}</div>` : '—'}</td>
+        <td class="num"><b>${money(invoiceExtra(inv))}</b></td><td class="num">${money(invoiceTotal(inv))}</td></tr>`;
+    }).join('') || '<tr><td colspan="8" class="empty">Chưa nhập hóa đơn – mỗi tháng sàn gửi mỗi shop 1 hóa đơn GTGT về phí (Kênh Người Bán → Tài chính → Hóa đơn)</td></tr>'}
+    </tbody></table></div>
+    <p class="muted small" style="padding:0 16px 12px">Chênh lệch nhỏ (vài %) là bình thường: hóa đơn tính theo tháng <b>hoàn thành</b> đơn, gồm cả đơn đặt cuối tháng trước; app chỉ có các đơn bạn đã nhập. Chênh trên 10% được tô đỏ – nên kiểm tra phí mới hoặc file đơn còn thiếu.</p></div>`;
+}
+function invoiceModal(id) {
+  const inv = state.platformInvoices.find(x => x.id === id) || (() => {
+    const d = addDays(new Date(new Date().getFullYear(), new Date().getMonth(), 1), -1);
+    return { platform: 'Shopee', shop: '', month: ymd(d).slice(0, 7), invoiceNo: '', vat: 8, fixed: 0, service: 0, transaction: 0, piship: 0, other: 0, otherNote: '' };
+  })();
+  const shops = [...new Set(state.orders.filter(o => o.shop).map(o => o.shop))];
+  const num = (k, l, hint = '') => `<label>${l}${hint ? ` <span class="muted small">${hint}</span>` : ''}<input name="${k}" inputmode="numeric" value="${inv[k] ? new Intl.NumberFormat('vi-VN').format(inv[k]) : ''}" placeholder="0"></label>`;
+  openModal(id ? 'Sửa hóa đơn phí sàn' : 'Nhập hóa đơn phí sàn', `
+    <form class="form" id="f-inv">
+      <label>Sàn<select name="platform">${opts(['Shopee', 'TikTok Shop'], inv.platform)}</select></label>
+      <label>Shop (gian hàng)<input name="shop" list="inv-shops" value="${esc(inv.shop)}" placeholder="VD: Shop chính"><datalist id="inv-shops">${shops.map(s => `<option value="${esc(s)}">`).join('')}</datalist></label>
+      <label>Tháng phí<input name="month" type="month" required value="${esc(inv.month)}"></label>
+      <label>Số hóa đơn<input name="invoiceNo" value="${esc(inv.invoiceNo)}" placeholder="VD: 8343384"></label>
+      <div class="section-t">Cột “Thành tiền” trên hóa đơn (chưa VAT)</div>
+      ${num('fixed', 'Phí hoa hồng cố định', '(đối chiếu)')}${num('service', 'Phí dịch vụ', '(đối chiếu)')}${num('transaction', 'Phí xử lý giao dịch', '(đối chiếu)')}
+      ${num('piship', 'Phí dịch vụ PiShip', '(cộng vào chi phí)')}${num('other', 'Phí khác chỉ có trên hóa đơn', '(cộng vào chi phí)')}
+      <label>Ghi chú phí khác<input name="otherNote" value="${esc(inv.otherNote)}"></label>
+      <label>Thuế suất GTGT (%)<input name="vat" type="number" min="0" max="20" step="0.5" value="${inv.vat}"></label>
+      <div class="total-line full"><span>Tổng thanh toán (gồm VAT)</span><b id="inv-total">—</b></div>
+      <p class="muted small full" id="inv-check"></p>
+      <div class="form-actions">${id ? `<button type="button" class="btn ghost danger" data-action="deleteInvoice" data-id="${id}" style="margin-right:auto">Xóa</button>` : ''}
+        <button type="button" class="btn ghost" data-action="closeModal">Hủy</button><button class="btn primary">Lưu</button></div>
+    </form>`, body => {
+    const f = $('#f-inv', body);
+    const read = () => {
+      const d = Object.fromEntries(new FormData(f));
+      ['fixed', 'service', 'transaction', 'piship', 'other'].forEach(k => d[k] = Math.round(parseMoney(d[k])));
+      d.vat = +d.vat || 0; d.shop = d.shop.trim(); d.invoiceNo = d.invoiceNo.trim(); d.otherNote = d.otherNote.trim();
+      return d;
+    };
+    const calc = () => {
+      const d = read(), app = d.month ? invoiceAppFees(d) : 0, hd = invoicePerOrder(d);
+      $('#inv-total', body).textContent = money(invoiceTotal(d));
+      $('#inv-check', body).innerHTML = `PiShip + phí khác cộng vào chi phí: <b>${money(invoiceExtra(d))}</b>. ` +
+        (app ? `Phí theo đơn trên HĐ ${money(hd)} · app ghi nhận ${money(app)} (đơn hoàn thành trong tháng) → chênh ${pct(hd ? Math.abs(hd - app) / hd : 0)}.` : 'Chưa có đơn hoàn thành của shop này trong tháng để đối chiếu.');
+    };
+    f.addEventListener('input', calc); calc();
+    f.addEventListener('submit', e => {
+      e.preventDefault();
+      const d = read();
+      const dup = state.platformInvoices.find(x => x.id !== id && x.platform === d.platform && (x.shop || '') === d.shop && x.month === d.month);
+      if (dup && !confirm(`Đã có hóa đơn ${d.platform} · ${d.shop || '—'} tháng ${d.month}. Vẫn lưu thêm?`)) return;
+      if (id) Object.assign(inv, d); else state.platformInvoices.push({ id: nextId('HD', state.platformInvoices, 3), ...d });
+      save(); closeModal(); toast('Đã lưu hóa đơn phí sàn'); rerender();
+    });
+  });
 }
 function taxModal() {
   if (typeof ensureAdAccounts === 'function') ensureAdAccounts();
@@ -1649,6 +1743,9 @@ const ACTIONS = {
   applyTemplate: d => applyTemplate(+d.i),
   newTx: d => txModal(d.type),
   taxSettings: () => taxModal(),
+  newInvoice: () => invoiceModal(),
+  editInvoice: d => invoiceModal(d.id),
+  deleteInvoice: d => { if (!confirm('Xóa hóa đơn này? PiShip / phí khác của nó sẽ không còn tính vào chi phí.')) return; state.platformInvoices = state.platformInvoices.filter(x => x.id !== d.id); save(); closeModal(); rerender(); },
   editTx: d => { const t = state.transactions.find(x => x.id === d.id); if (t) txModal(t.type, t.id); },
   deleteTx: d => { if (!confirm('Xóa giao dịch này?')) return; state.transactions = state.transactions.filter(t => t.id !== d.id); save(); rerender(); },
   newCustomer: () => customerModal(),

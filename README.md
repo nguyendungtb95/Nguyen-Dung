@@ -14,6 +14,7 @@ Trang quản trị cho cửa hàng thời trang online, gồm:
 | **Chi phí quảng cáo** | Bảng nhập chi phí Ads theo ngày cho từng tài khoản (Facebook Ads, TikTok Ads, Shopee Ads từng shop…); nhập file báo cáo .csv/.xlsx từ trình quản lý quảng cáo (tự nhận cột ngày & chi phí, cộng theo ngày, bỏ dòng tổng; file không có cột ngày thì chia đều); ROAS, chi phí/đơn theo tài khoản & theo ngày. Chi phí Ads tự vào lãi lỗ, lãi theo kênh và ROAS ở Marketing |
 | **Thu – Chi** | Sổ thu chi theo hạng mục, dòng tiền theo ngày, cơ cấu chi phí |
 | **Thuế & affiliate** | Cài đặt thuế cho hộ kinh doanh (Thu – Chi → Cài đặt thuế): thuế bán hàng 1,5% doanh thu (chọn kênh áp dụng), thuế 8% trên phí sàn, thuế quảng cáo theo từng tài khoản (Facebook 10%, Shopee / TikTok 8%). Hạng mục chi “Hoa hồng Affiliate / KOC”. Mỗi khoản là một dòng riêng trong báo cáo lãi lỗ và chi tiết đơn |
+| **Hóa đơn phí sàn** | Thu – Chi → “+ Nhập hóa đơn”: nhập hóa đơn GTGT phí hằng tháng của từng shop (phí cố định, dịch vụ, giao dịch, PiShip, phí khác, VAT). PiShip & phí khác cộng vào chi phí đúng shop, chia đều theo ngày; 3 loại phí theo đơn dùng để đối soát với app theo tháng hoàn thành đơn |
 | **Khách hàng** | Xem theo từng ngày: khách mới, khách mua, nhật ký chăm sóc; gợi ý khách cần xin feedback và khách lâu chưa tương tác; hạng khách (VIP / Thân thiết) |
 | **Dữ liệu** | Xuất / nhập file JSON sao lưu, xóa dữ liệu mẫu |
 
